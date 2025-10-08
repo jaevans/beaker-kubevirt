@@ -13,7 +13,9 @@
 	},
 	"features": {
 		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {},
-		"ghcr.io/devcontainers-extra/features/kubectx-kubens:1": {}
+		"ghcr.io/devcontainers-extra/features/kubectx-kubens:1": {},
+		"ghcr.io/devcontainers/features/node:1": {},
+		"ghcr.io/devcontainers/features/ruby:1": {}
 	},
 	"customizations": {
 		"vscode": {
@@ -37,7 +39,8 @@
 	"mounts": [
 		"source=${localWorkspaceFolder}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached",
 		// Keep the bash history in a volume so it persists across container restarts
-		"source=projectname-bashhistory,target=/commandhistory,type=volume"
+		"source=projectname-bashhistory,target=/commandhistory,type=volume",
+		"source=/home/milamber/.claude,target=/home/vscode/.claude,type=bind,consistency=cached"
 	]
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},

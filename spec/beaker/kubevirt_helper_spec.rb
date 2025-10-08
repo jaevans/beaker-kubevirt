@@ -96,9 +96,20 @@ RSpec.describe Beaker::KubevirtHelper do
       let(:helper) { described_class.new(options_without_clients) }
 
       before do
+        # Force fallback to manual parsing by making Kubeclient::Config.read fail
+        allow(Kubeclient::Config).to receive(:read).and_raise(StandardError.new('Mock failure'))
         allow(File).to receive(:exist?).with('/tmp/test-kubeconfig').and_return(true)
         allow(File).to receive(:read).with('/tmp/test-kubeconfig').and_return(mock_config.to_yaml)
-        allow(Kubeclient::Client).to receive(:new).and_return(clients[:k8s], clients[:kubevirt])
+
+        # Mock Kubeclient::Client.new to return specific clients based on the endpoint
+        allow(Kubeclient::Client).to receive(:new) do |endpoint, *_args|
+          if endpoint.include?('/apis/kubevirt.io')
+            clients[:kubevirt]
+          else
+            clients[:k8s]
+          end
+        end
+
         helper.send(:setup_clients)
       end
 
@@ -191,6 +202,15 @@ RSpec.describe Beaker::KubevirtHelper do
       }
     end
 
+    def cert_config
+      {
+        'user' => {
+          'client-certificate-data' => Base64.strict_encode64('fake-cert'),
+          'client-key-data' => Base64.strict_encode64('fake-key'),
+        },
+      }
+    end
+
     it 'sets up bearer token auth' do
       auth_options = helper.send(:setup_auth_options, context_config)
       expect(auth_options[:bearer_token]).to eq('test-token')
@@ -198,13 +218,13 @@ RSpec.describe Beaker::KubevirtHelper do
 
     it 'sets up client certificate auth' do
       allow(helper).to receive(:write_temp_file).and_return('/tmp/cert', '/tmp/key')
-      auth_options = helper.send(:setup_auth_options, context_config)
+      auth_options = helper.send(:setup_auth_options, cert_config)
       expect(auth_options[:client_cert]).to eq('/tmp/cert')
     end
 
     it 'sets up client key auth' do
       allow(helper).to receive(:write_temp_file).and_return('/tmp/cert', '/tmp/key')
-      auth_options = helper.send(:setup_auth_options, context_config)
+      auth_options = helper.send(:setup_auth_options, cert_config)
       expect(auth_options[:client_key]).to eq('/tmp/key')
     end
   end

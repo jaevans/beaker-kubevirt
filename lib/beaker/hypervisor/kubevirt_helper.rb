@@ -8,7 +8,7 @@ require 'base64'
 module Beaker
   # Helper class for KubeVirt operations
   class KubevirtHelper
-    attr_reader :namespace, :options
+    attr_reader :namespace, :options, :k8s_client, :kubevirt_client
 
     def initialize(options)
       @options = options
@@ -24,6 +24,12 @@ module Beaker
       # Only setup clients if not provided (for testing)
       return if @k8s_client && @kubevirt_client
 
+      setup_clients
+    end
+
+    ##
+    # Setup Kubernetes and KubeVirt clients
+    def setup_clients
       setup_kubernetes_client
       setup_kubevirt_client
     end

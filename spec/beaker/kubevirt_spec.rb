@@ -26,6 +26,7 @@ RSpec.describe Beaker::Kubevirt do
   before do
     allow(Beaker::KubevirtHelper).to receive(:new).and_return(kubevirt_helper)
     allow(kubevirt_helper).to receive(:namespace).and_return('beaker-test')
+    allow(kubevirt_helper).to receive(:setup_port_forward)
   end
 
   describe '#initialize' do
@@ -77,7 +78,7 @@ RSpec.describe Beaker::Kubevirt do
       before do
         allow(hypervisor).to receive(:create_vm)
         allow(hypervisor).to receive(:wait_for_vm_ready)
-        allow(hypervisor).to receive(:setup_ssh_access)
+        allow(hypervisor).to receive(:setup_networking)
         hypervisor.provision
       end
 
@@ -89,8 +90,8 @@ RSpec.describe Beaker::Kubevirt do
         expect(hypervisor).to have_received(:wait_for_vm_ready).with(hosts[0])
       end
 
-      it 'sets up ssh access' do
-        expect(hypervisor).to have_received(:setup_ssh_access).with(hosts[0])
+      it 'sets up networking' do
+        expect(hypervisor).to have_received(:setup_networking).with(hosts[0])
       end
     end
   end
@@ -126,10 +127,10 @@ RSpec.describe Beaker::Kubevirt do
         hypervisor: described_class.new(hosts, options),
         host: hosts[0],
         vm_name: 'test-vm',
-        cloud_init_data: 'base64-encoded-cloud-init',
+        cloud_init_secret: 'test-secret',
       }
     end
-    let(:vm_spec) { vm_spec_args[:hypervisor].send(:generate_vm_spec, **vm_spec_args.slice(:host, :vm_name, :cloud_init_data)) }
+    let(:vm_spec) { vm_spec_args[:hypervisor].send(:generate_vm_spec, vm_spec_args[:host], vm_spec_args[:vm_name], vm_spec_args[:cloud_init_secret]) }
 
     it 'has the correct apiVersion' do
       expect(vm_spec['apiVersion']).to eq('kubevirt.io/v1')
@@ -161,7 +162,7 @@ RSpec.describe Beaker::Kubevirt do
     it 'references the cloud-init secret' do
       volumes = vm_spec.dig('spec', 'template', 'spec', 'volumes')
       cloud_init_volume = volumes.find { |v| v['name'] == 'cloudinitdisk' }
-      expect(cloud_init_volume.dig('cloudInitNoCloud', 'secretRef', 'name')).to eq(vm_spec_args[:cloud_init_data])
+      expect(cloud_init_volume.dig('cloudInitNoCloud', 'secretRef', 'name')).to eq(vm_spec_args[:cloud_init_secret])
     end
   end
 
