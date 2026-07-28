@@ -54,7 +54,22 @@ module Beaker
     # VMI phases that indicate the VM will never reach Running.
     VMI_TERMINAL_PHASES = %w[Failed Succeeded].freeze
     # virt-launcher container waiting reasons we treat as fatal.
-    FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
+    FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff].freeze
+    # virt-launcher container waiting reasons that mean an image pull is being
+    # retried. kubelet re-attempts these with increasing backoff, and a cold
+    # pull-through cache, a slow upstream or a transient network error all clear
+    # without intervention — so they are only fatal once they persist (see
+    # DEFAULT_IMAGE_PULL_GRACE).
+    IMAGE_PULL_WAITING_REASONS = %w[ImagePullBackOff ErrImagePull].freeze
+    # How long an image pull may stay in backoff before we give up on it, unless
+    # overridden with :kubevirt_image_pull_grace. Still bounded by the overall
+    # wait_for_vm_ready timeout, which this does not extend.
+    DEFAULT_IMAGE_PULL_GRACE = 600
+    # Pull failures kubelet's retry will never fix — a bad tag, a missing repo or
+    # a rejected credential. Failing these immediately keeps a typo'd image as
+    # fast to diagnose as it was before the grace window existed. Transport-level
+    # failures (EOF, connection reset, timeouts) deliberately do not match.
+    DEFINITIVE_IMAGE_PULL_FAILURE_RE = /manifest unknown|not found|unauthorized|denied/i
     # virt-launcher container termination reasons we treat as fatal.
     FATAL_CONTAINER_TERMINATED_REASONS = %w[OOMKilled Error ContainerCannotRun].freeze
 
@@ -89,6 +104,11 @@ module Beaker
     #   (period_seconds * failure_threshold = 600s) accommodates slow Windows first-boots.
     # @option options [Integer] :timeout Timeout for operations. When the readiness probe is
     #   enabled, the effective wait is max(:timeout, probe budget + 60s).
+    # @option options [Integer] :kubevirt_image_pull_grace How long a containerDisk pull may
+    #   stay in ImagePullBackOff/ErrImagePull before it is treated as fatal (default: 600s).
+    #   kubelet retries image pulls, so a cold pull-through cache or a slow registry clears on
+    #   its own. Bounded by (and does not extend) the effective :timeout above, and skipped
+    #   entirely when the pull failure is definitive (unknown manifest, unauthorized, denied).
     # @option options [Boolean] :kubevirt_disable_virtio Disable virtio devices (for compatibility with Windows)
     def initialize(kubevirt_hosts, options)
       require 'beaker/hypervisor/kubevirt_helper'
@@ -108,6 +128,9 @@ module Beaker
       @test_group_identifier = "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
+      # "<vm_name>/<container>" => monotonic timestamp the container was first
+      # seen backing off an image pull. Cleared when it leaves that state.
+      @image_pull_backoff_since = {}
 
       # Register at_exit handler to ensure cleanup happens even on non-success exits
       # This handles cases like Ctrl+C, errors, or test failures that occur after
@@ -779,7 +802,7 @@ module Beaker
 
             raise "VMI #{vm_name} entered terminal phase #{phase} before becoming Ready" if VMI_TERMINAL_PHASES.include?(phase)
 
-            check_virt_launcher_health!(vm_name)
+            check_virt_launcher_health!(host)
 
             sleep SLEEPWAIT
           end
@@ -831,10 +854,13 @@ module Beaker
 
     ##
     # Inspect the virt-launcher pod backing a VMI and raise with a specific reason
-    # if it has already failed (OOMKilled, image pull errors, crash loops, etc.)
-    # so we fail fast instead of waiting the full timeout.
-    # @param [String] vm_name
-    def check_virt_launcher_health!(vm_name)
+    # if it has already failed (OOMKilled, crash loops, a container that cannot run)
+    # so we fail fast instead of waiting the full timeout. Image pull backoff is
+    # handled separately by check_image_pull_backoff!, since kubelet retries pulls
+    # and an early observation does not mean provisioning has failed.
+    # @param [Host] host The host being provisioned, carrying 'vm_name'
+    def check_virt_launcher_health!(host)
+      vm_name = host['vm_name']
       pod = @kubevirt_helper.get_virt_launcher_pod(vm_name)
       return unless pod
 
@@ -846,9 +872,15 @@ module Beaker
       statuses.each do |cs|
         name = cs['name']
         waiting_reason = cs.dig('state', 'waiting', 'reason')
-        if FATAL_CONTAINER_WAITING_REASONS.include?(waiting_reason)
-          raise "virt-launcher container #{name} for #{vm_name} is #{waiting_reason}: " \
-                "#{cs.dig('state', 'waiting', 'message')}"
+        if IMAGE_PULL_WAITING_REASONS.include?(waiting_reason)
+          check_image_pull_backoff!(host, vm_name, name, waiting_reason, cs.dig('state', 'waiting', 'message').to_s)
+        else
+          @image_pull_backoff_since.delete("#{vm_name}/#{name}")
+
+          if FATAL_CONTAINER_WAITING_REASONS.include?(waiting_reason)
+            raise "virt-launcher container #{name} for #{vm_name} is #{waiting_reason}: " \
+                  "#{cs.dig('state', 'waiting', 'message')}"
+          end
         end
 
         last_term = cs.dig('lastState', 'terminated') || cs.dig('state', 'terminated')
@@ -858,6 +890,57 @@ module Beaker
         hint = (reason == 'OOMKilled' && name == 'compute') ? ' — increase :kubevirt_memory_overhead (default 512Mi)' : ''
         raise "virt-launcher container #{name} for #{vm_name} terminated: #{reason}#{hint}"
       end
+    end
+
+    ##
+    # Decide whether a container backing off an image pull has waited long enough
+    # to be called a failure. kubelet retries pulls with increasing backoff, so a
+    # single observation of ImagePullBackOff proves nothing: an on-demand
+    # pull-through cache warming a multi-GB image, a slow upstream registry or a
+    # dropped connection all resolve on a later attempt. Raise only once the
+    # backoff has outlived the grace window — or immediately when the message says
+    # retrying is pointless.
+    # @param [Host] host The host being provisioned
+    # @param [String] vm_name
+    # @param [String] container Container name reporting the backoff
+    # @param [String] reason Waiting reason (ImagePullBackOff / ErrImagePull)
+    # @param [String] message Waiting message from kubelet
+    def check_image_pull_backoff!(host, vm_name, container, reason, message)
+      raise "virt-launcher container #{container} for #{vm_name} is #{reason}: #{message}" if DEFINITIVE_IMAGE_PULL_FAILURE_RE.match?(message)
+
+      key = "#{vm_name}/#{container}"
+      now = monotonic_time
+      @image_pull_backoff_since[key] ||= now
+      elapsed = (now - @image_pull_backoff_since[key]).round
+      grace = image_pull_grace(host)
+
+      if elapsed > grace
+        raise "virt-launcher container #{container} for #{vm_name} is still #{reason} after #{elapsed}s, " \
+              "exceeding the :kubevirt_image_pull_grace window of #{grace}s: #{message}"
+      end
+
+      @logger.debug("virt-launcher container #{container} for #{vm_name} is #{reason} " \
+                    "(#{elapsed}s of #{grace}s grace); waiting for kubelet to retry the pull")
+    end
+
+    ##
+    # How long an image pull may stay in backoff before it is treated as fatal.
+    # Per-host first so a suite can give a multi-GB Windows containerDisk more room
+    # than a small cloud image, then the global option, then the default.
+    # @param [Host] host The host being provisioned
+    # @return [Integer] seconds
+    def image_pull_grace(host)
+      host['kubevirt_image_pull_grace'] ||
+        @options[:kubevirt_image_pull_grace] ||
+        DEFAULT_IMAGE_PULL_GRACE
+    end
+
+    ##
+    # Monotonic clock for measuring elapsed time. Wall-clock time can jump
+    # backwards (NTP, DST) and would corrupt the grace-window arithmetic.
+    # @return [Float] seconds from an arbitrary origin
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     ##

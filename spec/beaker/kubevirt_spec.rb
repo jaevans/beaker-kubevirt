@@ -488,6 +488,135 @@ RSpec.describe Beaker::Kubevirt do
         .to raise_error(/terminal phase Failed/)
     end
 
+    describe 'image pull backoff' do
+      let(:pending_vmi) { { 'status' => { 'phase' => 'Pending' } } }
+      let(:running_vmi) { { 'status' => { 'phase' => 'Running', 'conditions' => [ready_true] } } }
+
+      # A cold pull-through cache dropping the manifest request: transport-level,
+      # and cleared by kubelet's own retry.
+      def transport_message
+        'Back-off pulling image "registry.example.com/windows-2016:latest": ' \
+          'ErrImagePull: failed to resolve reference: failed to do request: ' \
+          'Head "https://127.0.0.1:31000/v2/windows-2016/manifests/latest": EOF'
+      end
+
+      def waiting_pod(reason, message = transport_message)
+        {
+          'status' => {
+            'phase' => 'Pending',
+            'initContainerStatuses' => [
+              {
+                'name' => 'volumerootdisk-init',
+                'state' => { 'waiting' => { 'reason' => reason, 'message' => message } },
+              },
+            ],
+          },
+        }
+      end
+
+      it 'keeps waiting through ImagePullBackOff and returns once the retried pull succeeds' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
+          .and_return(waiting_pod('ImagePullBackOff'), nil)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'keeps waiting through ErrImagePull and returns once the retried pull succeeds' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
+          .and_return(waiting_pod('ErrImagePull'), nil)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'raises once the backoff persists past the default grace window' do
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 601)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }
+          .to raise_error(/ImagePullBackOff.*kubevirt_image_pull_grace/m)
+      end
+
+      it 'stays within the default grace window just short of 600 seconds' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
+          .and_return(waiting_pod('ImagePullBackOff'), nil)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 599)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'honors :kubevirt_image_pull_grace from the global options' do
+        hypervisor = described_class.new(hosts, options.merge(timeout: 600, kubevirt_image_pull_grace: 30))
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 31)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 31s/)
+      end
+
+      it 'prefers a per-host :kubevirt_image_pull_grace over the global option' do
+        hypervisor = described_class.new(hosts, options.merge(timeout: 600, kubevirt_image_pull_grace: 30))
+        host['kubevirt_image_pull_grace'] = 900
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 31, 901)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 901s/)
+      end
+
+      it 'restarts the grace window when the container leaves the backoff' do
+        healthy_pod = { 'status' => { 'phase' => 'Running', 'initContainerStatuses' => [{ 'name' => 'volumerootdisk-init', 'state' => { 'running' => {} } }] } }
+        backoff_pod = waiting_pod('ImagePullBackOff')
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
+          .and_return(backoff_pod, healthy_pod, backoff_pod, nil)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 700, 800)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'raises immediately when the pull failure names an unknown manifest' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(
+          waiting_pod('ErrImagePull', 'manifest unknown: manifest tagged "typo" not found'), nil
+        )
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/manifest unknown/)
+      end
+
+      it 'raises immediately when the registry denies the pull' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(
+          waiting_pod('ErrImagePull', 'failed to authorize: unauthorized: authentication required'), nil
+        )
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/unauthorized/)
+      end
+
+      it 'restores fail-fast behavior when the grace is set to zero' do
+        hypervisor = described_class.new(hosts, options.merge(timeout: 600, kubevirt_image_pull_grace: 0))
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 5)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 5s/)
+      end
+
+      it 'still raises immediately on CrashLoopBackOff' do
+        crash_pod = {
+          'status' => {
+            'phase' => 'Running',
+            'containerStatuses' => [
+              { 'name' => 'compute', 'state' => { 'waiting' => { 'reason' => 'CrashLoopBackOff', 'message' => 'back-off restarting failed container' } } },
+            ],
+          },
+        }
+        allow(kubevirt_helper).to receive_messages(get_vmi: pending_vmi, get_virt_launcher_pod: crash_pod)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/CrashLoopBackOff/)
+      end
+    end
+
     describe 'effective timeout' do
       it 'auto-raises the outer timeout to fit the probe budget' do
         hypervisor = described_class.new(hosts, options.merge(timeout: 5))
