@@ -254,6 +254,22 @@ All resources created are labeled for traceability and cleanup:
 
 These labels are used during `cleanup` to remove VMs, secrets, and services associated with the test group.
 
+### Supplying the test-group identifier
+
+By default the test-group identifier is `beaker-<random hex>`, generated per process. Set `BEAKER_KUBEVIRT_TEST_GROUP` to choose it instead:
+
+```bash
+BEAKER_KUBEVIRT_TEST_GROUP="beaker-ci-${CI_JOB_ID}" bundle exec rake beaker
+```
+
+This matters when something outside the beaker process has to clean up after it. In CI, a cancelled job can be killed before beaker tears anything down, and with a random identifier the job has no way to name the resources it leaked. With a known identifier the job can delete by `beaker/test-group=<its own identifier>` once beaker is gone, without disturbing other runs that share the namespace:
+
+```bash
+kubectl -n "$namespace" delete vm,dv,secret,svc -l "beaker/test-group=beaker-ci-${CI_JOB_ID}"
+```
+
+Values that are not valid Kubernetes label values are sanitized (and a warning is logged), so prefer an identifier that is already label-safe — otherwise the label will not be the string you set.
+
 ## Requirements
 
 - KubeVirt and Kubernetes cluster access via `kubeconfig`

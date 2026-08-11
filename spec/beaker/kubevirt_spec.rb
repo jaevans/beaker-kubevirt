@@ -30,6 +30,20 @@ RSpec.describe Beaker::Kubevirt do
 
   describe '#initialize' do
     let(:hypervisor) { described_class.new(hosts, options) }
+    # Pin BEAKER_KUBEVIRT_TEST_GROUP for every example here, so a value in the
+    # developer's own environment cannot change the identifier under test.
+    let(:env_value) { nil }
+
+    around do |example|
+      previous = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', nil)
+      ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = env_value
+      example.run
+      ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
+    end
+
+    def identifier_for(opts = options)
+      described_class.new(hosts, opts).instance_variable_get(:@test_group_identifier)
+    end
 
     it 'is a Kubevirt hypervisor' do
       expect(hypervisor).to be_instance_of(described_class)
@@ -61,6 +75,37 @@ RSpec.describe Beaker::Kubevirt do
       test_group_id = hypervisor.instance_variable_get(:@test_group_identifier)
 
       expect(test_group_id).to match(/^beaker-[a-f0-9]{8}$/)
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is set' do
+      let(:env_value) { 'beaker-ci-12345' }
+
+      it 'uses the supplied identifier' do
+        expect(identifier_for).to eq('beaker-ci-12345')
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is blank' do
+      let(:env_value) { '   ' }
+
+      it 'falls back to a generated identifier' do
+        expect(identifier_for).to match(/^beaker-[a-f0-9]{8}$/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is not a valid label value' do
+      let(:env_value) { 'beaker/ci run!' }
+      let(:logger) { instance_double(Logger).as_null_object }
+
+      it 'sanitizes it so the label can be selected on' do
+        expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-run')
+      end
+
+      it 'warns that the identifier was changed' do
+        identifier_for(options.merge(logger: logger))
+
+        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
+      end
     end
 
     it 'rejects namespaces that contain path separators' do

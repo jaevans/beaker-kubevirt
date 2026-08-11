@@ -105,7 +105,7 @@ module Beaker
       @hosts = kubevirt_hosts
       # Ensure the helper gets the validated namespace
       @kubevirt_helper = KubevirtHelper.new(@options)
-      @test_group_identifier = "beaker-#{SecureRandom.hex(4)}"
+      @test_group_identifier = configured_test_group_identifier || "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
 
@@ -440,6 +440,32 @@ module Beaker
     # @return [String] SSH public key content
     def find_ssh_public_key
       find_ssh_key_pair[:public_key]
+    end
+
+    ##
+    # An externally supplied test-group identifier, from
+    # BEAKER_KUBEVIRT_TEST_GROUP.
+    #
+    # A caller that outlives the beaker process needs to be able to find this
+    # run's resources. CI is the motivating case: when a job is cancelled, the
+    # beaker process can be killed before it tears anything down, and a random
+    # per-process identifier leaves the job no way to name what it leaked.
+    # Deleting by `beaker/test-group=<the identifier it chose>` cleans up that
+    # run without touching other runs sharing the namespace.
+    #
+    # @return [String, nil] the sanitized identifier, or nil when unset or blank
+    def configured_test_group_identifier
+      raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '').strip
+      return nil if raw.empty?
+
+      identifier = sanitize_k8s_label_value(raw)
+      if identifier != raw
+        @logger&.warn(
+          "BEAKER_KUBEVIRT_TEST_GROUP #{raw.inspect} is not usable as a Kubernetes " \
+          "label value; using #{identifier.inspect} instead",
+        )
+      end
+      identifier
     end
 
     def get_labels(host)
