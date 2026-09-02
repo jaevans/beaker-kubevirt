@@ -72,6 +72,12 @@ module Beaker
     # @option options [String] :kubevirt_network_mode Network mode (port-forward, nodeport, multus)
     # @option options [String] :kubevirt_ssh_key SSH public key to inject
     # @option options [String] :kubevirt_cpus CPU resources for VM
+    # @option options [String] :kubevirt_cpu_request CPU request for the VM pod, as a Kubernetes
+    #   CPU quantity ('2', '1500m'). Unset by default, which leaves KubeVirt to derive the request
+    #   from the guest core count divided by the cluster's cpuAllocationRatio (default 10). Set it
+    #   for guests that must not be throttled while booting -- Windows especially.
+    # @option options [String] :kubevirt_cpu_limit CPU limit for the VM pod, as a Kubernetes CPU
+    #   quantity. Unset by default, which leaves the compute container burstable.
     # @option options [String] :kubevirt_memory Memory resources for VM
     # @option options [String] :kubevirt_memory_overhead Extra memory added to guest for the
     #   container memory limit (default: '512Mi'). Needed for Windows guests where KubeVirt's
@@ -536,6 +542,15 @@ module Beaker
       memory_request = "#{memory_request}Mi" if /\A\d+\z/.match?(memory_request.to_s)
       memory_limit = "#{parse_memory_mib(memory) + parse_memory_mib(overhead)}Mi"
 
+      # Both unset by default: KubeVirt then derives the pod's CPU request from the guest core
+      # count divided by the cluster's cpuAllocationRatio, and sets no limit at all.
+      cpu_request = host['kubevirt_cpu_request'] || @options[:kubevirt_cpu_request]
+      cpu_limit = host['kubevirt_cpu_limit'] || @options[:kubevirt_cpu_limit]
+      resource_requests = { 'memory' => memory_request }
+      resource_requests['cpu'] = cpu_request.to_s if cpu_request
+      resource_limits = { 'memory' => memory_limit }
+      resource_limits['cpu'] = cpu_limit.to_s if cpu_limit
+
       vm_image = host['kubevirt_vm_image'] || @options[:kubevirt_vm_image]
       host_name = host.respond_to?(:name) ? host.name : host['name']
 
@@ -573,8 +588,8 @@ module Beaker
                   'guest' => memory.to_s,
                 },
                 'resources' => {
-                  'requests' => { 'memory' => memory_request },
-                  'limits' => { 'memory' => memory_limit },
+                  'requests' => resource_requests,
+                  'limits' => resource_limits,
                 },
                 'devices' => generate_hardware_spec(host),
                 'features' => {

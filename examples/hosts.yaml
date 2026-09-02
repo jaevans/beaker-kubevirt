@@ -8,6 +8,11 @@ HOSTS:
     kubevirt_network_mode: port-forward
     kubevirt_ssh_key: ~/.ssh/id_rsa.pub
     kubevirt_cpus: 2
+    # Guest core count is not the pod's CPU request: without kubevirt_cpu_request
+    # KubeVirt divides the cores by the cluster's cpuAllocationRatio (default 10),
+    # so these 2 cores request only 200m and get throttled on a busy node.
+    # kubevirt_cpu_request: 2
+    # kubevirt_cpu_limit: 2
     kubevirt_memory: 4Gi
     # Extra memory added to the guest for the virt-launcher container memory
     # limit. Bump this for Windows guests that get OOMKilled with the default.
