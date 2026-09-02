@@ -500,8 +500,9 @@ RSpec.describe Beaker::Kubevirt do
           'Head "https://127.0.0.1:31000/v2/windows-2016/manifests/latest": EOF'
       end
 
-      def waiting_pod(reason, message = transport_message)
+      def waiting_pod(reason, message = transport_message, name: 'virt-launcher-test-vm-aaaaa')
         {
+          'metadata' => { 'name' => name },
           'status' => {
             'phase' => 'Pending',
             'initContainerStatuses' => [
@@ -568,7 +569,7 @@ RSpec.describe Beaker::Kubevirt do
       end
 
       it 'restarts the grace window when the container leaves the backoff' do
-        healthy_pod = { 'status' => { 'phase' => 'Running', 'initContainerStatuses' => [{ 'name' => 'volumerootdisk-init', 'state' => { 'running' => {} } }] } }
+        healthy_pod = { 'metadata' => { 'name' => 'virt-launcher-test-vm-aaaaa' }, 'status' => { 'phase' => 'Running', 'initContainerStatuses' => [{ 'name' => 'volumerootdisk-init', 'state' => { 'running' => {} } }] } }
         backoff_pod = waiting_pod('ImagePullBackOff')
         allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, pending_vmi, running_vmi)
         allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
@@ -593,14 +594,26 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/unauthorized/)
       end
 
-      it 'restores fail-fast behavior when the grace is set to zero' do
+      it 'switches the window off and fails on the first observation when the grace is zero' do
         hypervisor = described_class.new(hosts, options.merge(timeout: 600, kubevirt_image_pull_grace: 0))
         allow(kubevirt_helper).to receive_messages(
           get_vmi: pending_vmi,
           get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
         )
-        allow(hypervisor).to receive(:monotonic_time).and_return(0, 5)
-        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 5s/)
+        expect(hypervisor).not_to receive(:monotonic_time)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }
+          .to raise_error(/volumerootdisk-init for test-vm is ImagePullBackOff: Back-off pulling image/)
+      end
+
+      it 'gives a replaced virt-launcher pod a grace window of its own' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(
+          waiting_pod('ImagePullBackOff'),
+          waiting_pod('ImagePullBackOff', name: 'virt-launcher-test-vm-bbbbb'),
+          nil,
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 700)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
       end
 
       it 'still raises immediately on CrashLoopBackOff' do
