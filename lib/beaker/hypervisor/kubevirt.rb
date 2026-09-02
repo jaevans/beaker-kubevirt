@@ -109,6 +109,8 @@ module Beaker
     #   kubelet retries image pulls, so a cold pull-through cache or a slow registry clears on
     #   its own. Bounded by (and does not extend) the effective :timeout above, and skipped
     #   entirely when the pull failure is definitive (unknown manifest, unauthorized, denied).
+    #   Set it to 0 to switch the window off and fail on the first backoff, as this check
+    #   did before the option existed.
     # @option options [Boolean] :kubevirt_disable_virtio Disable virtio devices (for compatibility with Windows)
     def initialize(kubevirt_hosts, options)
       require 'beaker/hypervisor/kubevirt_helper'
@@ -864,6 +866,15 @@ module Beaker
       pod = @kubevirt_helper.get_virt_launcher_pod(vm_name)
       return unless pod
 
+      # Image-pull backoff is tracked per virt-launcher pod rather than per VMI.
+      # A pod replaced mid-provision -- rescheduled, or evicted while pulling --
+      # starts the pull again on a node whose cache may be cold, and must not
+      # inherit the window its predecessor already spent. Keying on the pod also
+      # means a momentary absence (API lag, or a `pods.first` that briefly sees
+      # the successor) neither resets nor shortens the window a live pod is
+      # accumulating.
+      pod_name = pod.dig('metadata', 'name') || vm_name
+
       phase = pod.dig('status', 'phase')
       raise "virt-launcher pod for #{vm_name} entered phase #{phase}" if phase == 'Failed'
 
@@ -873,9 +884,9 @@ module Beaker
         name = cs['name']
         waiting_reason = cs.dig('state', 'waiting', 'reason')
         if IMAGE_PULL_WAITING_REASONS.include?(waiting_reason)
-          check_image_pull_backoff!(host, vm_name, name, waiting_reason, cs.dig('state', 'waiting', 'message').to_s)
+          check_image_pull_backoff!(host, pod_name, name, waiting_reason, cs.dig('state', 'waiting', 'message').to_s)
         else
-          @image_pull_backoff_since.delete("#{vm_name}/#{name}")
+          @image_pull_backoff_since.delete("#{pod_name}/#{name}")
 
           if FATAL_CONTAINER_WAITING_REASONS.include?(waiting_reason)
             raise "virt-launcher container #{name} for #{vm_name} is #{waiting_reason}: " \
@@ -899,20 +910,26 @@ module Beaker
     # pull-through cache warming a multi-GB image, a slow upstream registry or a
     # dropped connection all resolve on a later attempt. Raise only once the
     # backoff has outlived the grace window — or immediately when the message says
-    # retrying is pointless.
-    # @param [Host] host The host being provisioned
-    # @param [String] vm_name
+    # retrying is pointless, or when the window has been switched off.
+    # @param [Host] host The host being provisioned, carrying 'vm_name'
+    # @param [String] pod_name Name of the virt-launcher pod reporting the backoff
     # @param [String] container Container name reporting the backoff
     # @param [String] reason Waiting reason (ImagePullBackOff / ErrImagePull)
     # @param [String] message Waiting message from kubelet
-    def check_image_pull_backoff!(host, vm_name, container, reason, message)
-      raise "virt-launcher container #{container} for #{vm_name} is #{reason}: #{message}" if DEFINITIVE_IMAGE_PULL_FAILURE_RE.match?(message)
+    def check_image_pull_backoff!(host, pod_name, container, reason, message)
+      vm_name = host['vm_name']
+      grace = image_pull_grace(host)
 
-      key = "#{vm_name}/#{container}"
+      # Two ways to skip the window and fail on this very observation: kubelet's
+      # retry will never fix a definitive failure, and a grace of zero is the
+      # documented way to opt out of the window entirely. Both keep the message
+      # the check raised before the window existed.
+      raise "virt-launcher container #{container} for #{vm_name} is #{reason}: #{message}" if DEFINITIVE_IMAGE_PULL_FAILURE_RE.match?(message) || grace <= 0
+
+      key = "#{pod_name}/#{container}"
       now = monotonic_time
       @image_pull_backoff_since[key] ||= now
       elapsed = (now - @image_pull_backoff_since[key]).round
-      grace = image_pull_grace(host)
 
       if elapsed > grace
         raise "virt-launcher container #{container} for #{vm_name} is still #{reason} after #{elapsed}s, " \
@@ -926,7 +943,8 @@ module Beaker
     ##
     # How long an image pull may stay in backoff before it is treated as fatal.
     # Per-host first so a suite can give a multi-GB Windows containerDisk more room
-    # than a small cloud image, then the global option, then the default.
+    # than a small cloud image, then the global option, then the default. Zero
+    # switches the window off rather than setting an empty one.
     # @param [Host] host The host being provisioned
     # @return [Integer] seconds
     def image_pull_grace(host)
