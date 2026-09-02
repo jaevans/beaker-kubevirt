@@ -86,6 +86,7 @@ CONFIG:
 | `kubevirt_vm_ssh_port` | SSH port inside the VM | No | `22` | HOSTS (per-host) |
 | `kubevirt_readiness_probe_disabled` | Skip the VMI SSH readinessProbe. Default is `false` for pod-network modes and `true` for `multus` (where a probe from the virt-launcher netns typically can't reach a bridge-only guest). | No | mode-dependent | HOSTS (per-host), CONFIG |
 | `kubevirt_readiness_probe` | Probe tuning hash (snake_case keys): `initial_delay_seconds` (30), `period_seconds` (10), `timeout_seconds` (3), `failure_threshold` (60), `success_threshold` (1). The default failure budget (600s) accommodates slow Windows first-boots. When the probe is enabled, `timeout` is auto-raised to cover this budget. | No | see description | HOSTS (per-host), CONFIG |
+| `kubevirt_unschedulable_grace` | Seconds the virt-launcher pod may stay unschedulable (`PodScheduled=False`, reason `Unschedulable` or `SchedulerError`) before provisioning gives up and reports the scheduler's own message. Cannot be immediate — an unschedulable pod is precisely what tells a cluster autoscaler to add a node. Bounded by the effective `timeout`, which this does not raise. | No | `300` | HOSTS (per-host), CONFIG |
 | `kubevirt_disable_virtio` | Disable virtio devices (for Windows compatibility). If set to true the disk bus will be set to `sata` and the network adapter will be model `e1000` | No | `false` | HOSTS (per-host) |
 
 **Important**: The `namespace`, `kubeconfig`, and `kubecontext` options must be specified in the global `CONFIG` section, not per-host. All VMs will be created in the same Kubernetes namespace.
@@ -93,6 +94,7 @@ CONFIG:
 Notes:
 - Several per-host options support global fallbacks via `CONFIG` (e.g., `kubevirt_cpus`, `kubevirt_memory`, `kubevirt_vm_ssh_port`).
 - The `networks` key for Multus is intentionally unprefixed (use `networks`, not `kubevirt_networks`).
+- A virt-launcher pod the scheduler cannot place used to be invisible: its phase is `Pending`, not `Failed`, and it carries no container statuses at all, so provisioning waited out the full `timeout` and reported `Timeout waiting for VM ... to be ready` — indistinguishable from a slow guest boot. It now reports the scheduler's own message (`0/8 nodes are available: 5 Insufficient cpu`) as soon as the state is seen, and fails after `kubevirt_unschedulable_grace`. Raise `kubevirt_memory_request` or a CPU request beyond what a node can offer and this is the error you will get.
 - Long-running commands aren't killed by idle-timeout drops, even when output streams in only one direction (e.g., a Windows scanner running for many minutes). The `port-forward` proxy no longer enforces a client-side read-silence timeout (it relied on net-ssh keepalive packets that net-ssh suppresses while server output is flowing) and instead sends a WebSocket protocol ping every 60s to keep the upstream tunnel alive. net-ssh keepalive defaults are also tightened to `keepalive_interval: 60`, `keepalive_maxcount: 5` — Beaker already enables `keepalive: true` — which protects `multus` and `nodeport` modes against NAT/conntrack timeouts. Override per-host under `ssh:` if needed.
 
 ### VM Image Formats

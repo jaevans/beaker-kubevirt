@@ -57,6 +57,16 @@ module Beaker
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
     # virt-launcher container termination reasons we treat as fatal.
     FATAL_CONTAINER_TERMINATED_REASONS = %w[OOMKilled Error ContainerCannotRun].freeze
+    # PodScheduled=False reasons that mean the scheduler cannot place the virt-launcher pod.
+    # SchedulingGated is deliberately excluded: a gated pod is being held on purpose by
+    # whoever set the gate, and is not the cluster failing to find room.
+    UNSCHEDULABLE_POD_REASONS = %w[Unschedulable SchedulerError].freeze
+    # How long the virt-launcher pod may stay unschedulable before provisioning gives up,
+    # unless overridden with :kubevirt_unschedulable_grace. This cannot be immediate: a
+    # cluster autoscaler treats an unschedulable pod as its cue to add a node, and a node
+    # returning from a drain or reboot frees capacity on its own — both take minutes. Still
+    # bounded by the overall wait_for_vm_ready timeout, which this does not extend.
+    DEFAULT_UNSCHEDULABLE_GRACE = 300
 
     ##
     # Create a new instance of the KubeVirt hypervisor object
@@ -89,6 +99,10 @@ module Beaker
     #   (period_seconds * failure_threshold = 600s) accommodates slow Windows first-boots.
     # @option options [Integer] :timeout Timeout for operations. When the readiness probe is
     #   enabled, the effective wait is max(:timeout, probe budget + 60s).
+    # @option options [Integer] :kubevirt_unschedulable_grace How long the virt-launcher pod may
+    #   remain unschedulable before it is treated as fatal (default: 300s). An unschedulable pod
+    #   is what triggers a cluster autoscaler to add a node, so this cannot be immediate.
+    #   Bounded by (and does not extend) the effective :timeout above.
     # @option options [Boolean] :kubevirt_disable_virtio Disable virtio devices (for compatibility with Windows)
     def initialize(kubevirt_hosts, options)
       require 'beaker/hypervisor/kubevirt_helper'
@@ -108,6 +122,9 @@ module Beaker
       @test_group_identifier = "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
+      # vm_name => monotonic timestamp its virt-launcher pod was first seen
+      # unschedulable. Cleared as soon as the scheduler places it.
+      @unschedulable_since = {}
 
       # Register at_exit handler to ensure cleanup happens even on non-success exits
       # This handles cases like Ctrl+C, errors, or test failures that occur after
@@ -779,7 +796,7 @@ module Beaker
 
             raise "VMI #{vm_name} entered terminal phase #{phase} before becoming Ready" if VMI_TERMINAL_PHASES.include?(phase)
 
-            check_virt_launcher_health!(vm_name)
+            check_virt_launcher_health!(host)
 
             sleep SLEEPWAIT
           end
@@ -832,14 +849,18 @@ module Beaker
     ##
     # Inspect the virt-launcher pod backing a VMI and raise with a specific reason
     # if it has already failed (OOMKilled, image pull errors, crash loops, etc.)
-    # so we fail fast instead of waiting the full timeout.
-    # @param [String] vm_name
-    def check_virt_launcher_health!(vm_name)
+    # or if the scheduler cannot place it, so we fail fast instead of waiting the
+    # full timeout.
+    # @param [Host] host The host being provisioned, carrying 'vm_name'
+    def check_virt_launcher_health!(host)
+      vm_name = host['vm_name']
       pod = @kubevirt_helper.get_virt_launcher_pod(vm_name)
       return unless pod
 
       phase = pod.dig('status', 'phase')
       raise "virt-launcher pod for #{vm_name} entered phase #{phase}" if phase == 'Failed'
+
+      check_pod_schedulable!(host, vm_name, pod)
 
       statuses = Array(pod.dig('status', 'containerStatuses')) +
                  Array(pod.dig('status', 'initContainerStatuses'))
@@ -858,6 +879,67 @@ module Beaker
         hint = (reason == 'OOMKilled' && name == 'compute') ? ' — increase :kubevirt_memory_overhead (default 512Mi)' : ''
         raise "virt-launcher container #{name} for #{vm_name} terminated: #{reason}#{hint}"
       end
+    end
+
+    ##
+    # Raise once the scheduler has been unable to place the virt-launcher pod for
+    # longer than the grace window.
+    #
+    # An unschedulable pod is invisible to every other check in
+    # check_virt_launcher_health!: its phase is Pending rather than Failed, and both
+    # containerStatuses and initContainerStatuses are absent entirely, because no
+    # container was ever assigned to a node. So the wait loop spins until the overall
+    # timeout and reports "Timeout waiting for VM ... to be ready" — the same message
+    # a slow guest boot produces. The one failure the cluster can describe precisely
+    # ("0/8 nodes are available: 5 Insufficient cpu") is the one that arrives with no
+    # explanation at all.
+    #
+    # Being unschedulable is not immediately terminal, which is why the grace window
+    # exists rather than raising on first sight. The reason is logged as soon as it is
+    # seen, so it is never silent even when the window is set wide.
+    #
+    # @param [Host] host The host being provisioned
+    # @param [String] vm_name
+    # @param [Hash] pod The virt-launcher pod
+    def check_pod_schedulable!(host, vm_name, pod)
+      condition = Array(pod.dig('status', 'conditions')).find { |c| c['type'] == 'PodScheduled' }
+      reason = (condition && condition['status'] == 'False') ? condition['reason'] : nil
+
+      unless UNSCHEDULABLE_POD_REASONS.include?(reason)
+        @unschedulable_since.delete(vm_name)
+        return
+      end
+
+      message = condition['message'].to_s
+      grace = unschedulable_grace(host)
+      first_seen = @unschedulable_since[vm_name]
+      if first_seen.nil?
+        first_seen = @unschedulable_since[vm_name] = monotonic_time
+        @logger.warn("virt-launcher pod for #{vm_name} is #{reason}, allowing #{grace}s " \
+                     "for capacity: #{message}")
+      end
+
+      waited = (monotonic_time - first_seen).round
+      return if waited < grace
+
+      raise "virt-launcher pod for #{vm_name} is still #{reason} after #{waited}s: #{message}"
+    end
+
+    ##
+    # Seconds the virt-launcher pod may remain unschedulable before it is fatal.
+    # @param [Host] host
+    # @return [Integer]
+    def unschedulable_grace(host)
+      value = host['kubevirt_unschedulable_grace'] || @options[:kubevirt_unschedulable_grace]
+      value.nil? ? DEFAULT_UNSCHEDULABLE_GRACE : value.to_i
+    end
+
+    ##
+    # Monotonic seconds, so a wall-clock adjustment mid-wait cannot shorten or
+    # extend a grace window.
+    # @return [Float]
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     ##
