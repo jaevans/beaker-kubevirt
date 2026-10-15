@@ -1093,11 +1093,13 @@ module Beaker
       # Ensure it starts with a letter
       sanitized = "x#{sanitized}" unless /[a-z]/.match?(sanitized[0])
 
-      # Ensure it doesn't end with a hyphen
-      sanitized = "#{sanitized}0" if sanitized[-1] == '-'
-
-      # Ensure it's not too long (max 63 chars for DNS label)
+      # Truncate before fixing the last character: a cut that lands on a
+      # hyphen would otherwise produce a name the API server rejects.
       sanitized = sanitized[0..62] if sanitized.length > 63
+
+      # Ensure it doesn't end with a hyphen. At 63 characters the hyphen is
+      # replaced rather than followed, so the name stays within the limit.
+      sanitized = "#{sanitized[0..61]}0" if sanitized[-1] == '-'
 
       sanitized
     end

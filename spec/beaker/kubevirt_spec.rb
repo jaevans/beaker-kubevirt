@@ -835,6 +835,21 @@ RSpec.describe Beaker::Kubevirt do
       expect(hypervisor.send(:sanitize_k8s_name, 'bad-sanitized-')).to eq('bad-sanitized-0')
     end
 
+    it 'does not end in a hyphen when the 63-character cut lands on one' do
+      # A DataVolume name CDI rejected: the cut fell on the hyphen before "x86".
+      name = 'beaker-69556f75-rocky-10-x64-Rocky-10-GenericCloud-Base.latest.x86_64.qcow2-dv'
+      result = hypervisor.send(:sanitize_k8s_name, name)
+      expect(result).to eq('beaker-69556f75-rocky-10-x64-rocky-10-genericcloud-base-latest0')
+      expect(result.length).to eq(63)
+      expect(result).to match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/)
+    end
+
+    it 'stays within 63 characters when a prefix is added to a long name' do
+      result = hypervisor.send(:sanitize_k8s_name, "1#{'a' * 70}")
+      expect(result.length).to eq(63)
+      expect(result).to start_with('x1')
+    end
+
     it 'handles names that do not start with a letter' do
       expect(hypervisor.send(:sanitize_k8s_name, '1invalid-name')).to eq('x1invalid-name')
     end
