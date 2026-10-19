@@ -53,6 +53,9 @@ module Beaker
 
     # VMI phases that indicate the VM will never reach Running.
     VMI_TERMINAL_PHASES = %w[Failed Succeeded].freeze
+
+    # Values KubeVirt accepts for a disk's cache mode
+    DISK_CACHE_MODES = %w[none writethrough writeback].freeze
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
     # virt-launcher container termination reasons we treat as fatal.
@@ -90,6 +93,8 @@ module Beaker
     # @option options [Integer] :timeout Timeout for operations. When the readiness probe is
     #   enabled, the effective wait is max(:timeout, probe budget + 60s).
     # @option options [Boolean] :kubevirt_disable_virtio Disable virtio devices (for compatibility with Windows)
+    # @option options [String] :kubevirt_disk_cache Cache mode for the root disk: none, writethrough
+    #   or writeback. Unset leaves the choice to KubeVirt.
     def initialize(kubevirt_hosts, options)
       require 'beaker/hypervisor/kubevirt_helper'
 
@@ -484,18 +489,40 @@ module Beaker
     end
 
     ##
+    # Cache mode for the root disk, from the host or the global CONFIG.
+    # Unset leaves the choice to KubeVirt, which uses none when the backing
+    # store supports O_DIRECT and writethrough otherwise. writeback lets the
+    # virt-launcher's page cache absorb guest writes until the guest flushes,
+    # which suits throwaway test VMs on slow or shared storage.
+    # @param [Host] host The host configuration
+    # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
+    def disk_cache(host)
+      cache = host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      return nil if cache.nil? || cache.to_s.empty?
+
+      cache = cache.to_s
+      raise ArgumentError, "kubevirt_disk_cache must be one of #{DISK_CACHE_MODES.join(', ')}, got #{cache.inspect}" unless DISK_CACHE_MODES.include?(cache)
+
+      cache
+    end
+
+    ##
     # Generate the hardware devices specification for the VM
     # @param [Host] host The host configuration
     # @return [Hash] Hardware devices specification
     def generate_hardware_spec(host)
+      rootdisk = {
+        'name' => 'rootdisk',
+        'disk' => {
+          'bus' => disk_bus(host),
+        },
+      }
+      cache = disk_cache(host)
+      rootdisk['cache'] = cache if cache
+
       {
         'disks' => [
-          {
-            'name' => 'rootdisk',
-            'disk' => {
-              'bus' => disk_bus(host),
-            },
-          },
+          rootdisk,
           {
             'name' => 'cidata',
             'disk' => {
