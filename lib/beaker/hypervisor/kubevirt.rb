@@ -122,8 +122,9 @@ module Beaker
       @test_group_identifier = "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
-      # vm_name => monotonic timestamp its virt-launcher pod was first seen
-      # unschedulable. Cleared as soon as the scheduler places it.
+      # vm_name => { uid:, since: } — the virt-launcher pod's UID and the monotonic
+      # timestamp it was first seen unschedulable. Cleared as soon as the scheduler
+      # places it; restarted when a pod with a different UID replaces it.
       @unschedulable_since = {}
 
       # Register at_exit handler to ensure cleanup happens even on non-success exits
@@ -912,14 +913,17 @@ module Beaker
 
       message = condition['message'].to_s
       grace = unschedulable_grace(host)
-      first_seen = @unschedulable_since[vm_name]
-      if first_seen.nil?
-        first_seen = @unschedulable_since[vm_name] = monotonic_time
+      uid = pod.dig('metadata', 'uid')
+      tracked = @unschedulable_since[vm_name]
+      # A replacement pod must get its own window, not inherit the elapsed time of
+      # the one it replaced.
+      if tracked.nil? || tracked[:uid] != uid
+        tracked = @unschedulable_since[vm_name] = { uid: uid, since: monotonic_time }
         @logger.warn("virt-launcher pod for #{vm_name} is #{reason}, allowing #{grace}s " \
                      "for capacity: #{message}")
       end
 
-      waited = (monotonic_time - first_seen).round
+      waited = (monotonic_time - tracked[:since]).round
       return if waited < grace
 
       raise "virt-launcher pod for #{vm_name} is still #{reason} after #{waited}s: #{message}"

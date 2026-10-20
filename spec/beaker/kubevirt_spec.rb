@@ -492,8 +492,10 @@ RSpec.describe Beaker::Kubevirt do
       # A real unschedulable pod carries neither containerStatuses nor
       # initContainerStatuses: nothing was ever assigned to a node. Verified against
       # a live cluster, and the reason this is not caught by any other check.
-      def unschedulable_pod(reason: 'Unschedulable', message: '0/8 nodes are available: 5 Insufficient cpu.')
+      def unschedulable_pod(reason: 'Unschedulable', message: '0/8 nodes are available: 5 Insufficient cpu.',
+                            uid: 'pod-uid-1')
         {
+          'metadata' => { 'uid' => uid },
           'status' => {
             'phase' => 'Pending',
             'conditions' => [
@@ -501,6 +503,12 @@ RSpec.describe Beaker::Kubevirt do
             ],
           },
         }
+      end
+
+      let(:clock) { [0] }
+
+      def stub_monotonic_clock
+        allow(hypervisor).to receive(:monotonic_time) { clock[0] }
       end
 
       before do
@@ -581,6 +589,44 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/still Unschedulable/)
         hypervisor.send(:check_pod_schedulable!, host, 'test-vm', scheduled)
         expect(hypervisor.instance_variable_get(:@unschedulable_since)).not_to have_key('test-vm')
+      end
+
+      it 'waits through a nonzero window and raises once it has elapsed' do
+        stub_monotonic_clock
+        host['kubevirt_unschedulable_grace'] = 300
+        polls = 0
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod) do
+          polls += 1
+          raise 'grace window never expired' if polls > 10
+
+          clock[0] = (polls - 1) * 100
+          unschedulable_pod
+        end
+        expect { hypervisor.send(:wait_for_vm_ready, host) }
+          .to raise_error(/still Unschedulable after 300s/)
+        expect(polls).to eq(4)
+      end
+
+      it 'gives a replacement pod its own window instead of the elapsed time of the one it replaced' do
+        stub_monotonic_clock
+        host['kubevirt_unschedulable_grace'] = 300
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_invoke(
+          lambda { |_|
+            clock[0] = 0
+            unschedulable_pod(uid: 'pod-uid-1')
+          },
+          lambda { |_|
+            clock[0] = 400
+            unschedulable_pod(uid: 'pod-uid-2')
+          },
+        )
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(
+          { 'status' => { 'phase' => 'Scheduling' } },
+          { 'status' => { 'phase' => 'Scheduling' } },
+          { 'status' => { 'phase' => 'Running', 'conditions' => [ready_true] } },
+        )
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+        expect(options[:logger]).to have_received(:warn).with(/is Unschedulable, allowing 300s/).twice
       end
 
       it 'defaults the grace window to 300s' do
