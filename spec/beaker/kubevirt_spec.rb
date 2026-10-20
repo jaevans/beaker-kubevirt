@@ -1630,6 +1630,35 @@ RSpec.describe Beaker::Kubevirt do
     end
   end
 
+  describe '#setup_nodeport' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+
+    before do
+      allow(kubevirt_helper).to receive_messages(
+        create_nodeport_service: { 'spec' => { 'ports' => [{ 'nodePort' => 30_022 }] } },
+        node_ip: '10.0.0.1',
+      )
+    end
+
+    def service_name_for(vm_name)
+      host = { 'vm_name' => vm_name }
+      hypervisor.send(:setup_nodeport, host)
+      host['service_name']
+    end
+
+    it 'names the service after the VM' do
+      expect(service_name_for('beaker-abc123-test-host')).to eq('beaker-abc123-test-host-ssh')
+    end
+
+    it 'keeps the service name within the DNS label limit for a maximum-length VM name' do
+      names = [service_name_for("#{'a' * 54}-11111111"), service_name_for("#{'a' * 54}-22222222")]
+
+      expect(names.uniq.size).to eq(2)
+      expect(names).to all(have_attributes(length: be <= 63))
+      expect(names).to all(match(/\A[a-z][a-z0-9-]*[a-z0-9]\z/))
+    end
+  end
+
   describe '#get_labels' do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:host) { { 'name' => 'test-host' } }
