@@ -1514,6 +1514,24 @@ RSpec.describe Beaker::Kubevirt do
       end
     end
 
+    context 'with a VM name just under the DNS label limit' do
+      let(:vm_name) { "#{'a' * 56}-host1" }
+
+      before do
+        allow(hypervisor).to receive(:generate_vm_name).and_return(vm_name)
+      end
+
+      %w[http://example.com/fedora-disk.qcow2 my-pvc].each do |image|
+        it "keeps dv_name a valid, distinct DNS label for #{image}" do
+          options[:kubevirt_vm_image] = image
+          hypervisor.send(:create_vm, host)
+
+          expect(host['dv_name']).to match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/)
+          expect(host['dv_name']).not_to eq(vm_name)
+        end
+      end
+    end
+
     context 'with docker:// container image' do
       let(:vm_image) { 'docker://quay.io/kubevirt/fedora-cloud-container-disk-demo' }
 

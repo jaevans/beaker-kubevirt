@@ -283,7 +283,7 @@ module Beaker
       if vm_image&.start_with?('http://', 'https://')
         base_name = vm_image.split('/').last
         # Create a unique datavolume name by including the VM name in it
-        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{base_name}-dv")
+        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{base_name}-dv")
       elsif vm_image && !vm_image.start_with?('docker://', 'oci://')
         # For PVC sources, we also need to clone to avoid sharing the same disk
         source_pvc = vm_image.sub(%r{^pvc://}, '')
@@ -293,7 +293,7 @@ module Beaker
         else
           source_pvc_name = source_pvc
         end
-        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{source_pvc_name}")
+        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{source_pvc_name}")
 
       end
 
