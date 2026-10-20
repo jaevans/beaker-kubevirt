@@ -1648,6 +1648,27 @@ RSpec.describe Beaker::Kubevirt do
     end
   end
 
+  describe '#create_cloud_init_secret' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+
+    before { allow(kubevirt_helper).to receive(:create_secret) }
+
+    def secret_name_for(vm_name)
+      hypervisor.send(:create_cloud_init_secret, { 'name' => 'test-host', 'vm_name' => vm_name }, '#cloud-config')
+    end
+
+    it 'names the secret after the VM' do
+      expect(secret_name_for('beaker-abc123-test-host')).to eq('beaker-abc123-test-host-cloud-init')
+    end
+
+    it 'keeps the secret name a valid DNS label for a maximum-length VM name' do
+      names = [secret_name_for("#{'a' * 54}-11111111"), secret_name_for("#{'a' * 54}-22222222")]
+
+      expect(names.uniq.size).to eq(2)
+      expect(names).to all(match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/))
+    end
+  end
+
   describe '#setup_nodeport' do
     let(:hypervisor) { described_class.new(hosts, options) }
 

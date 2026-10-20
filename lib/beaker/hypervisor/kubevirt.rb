@@ -315,7 +315,7 @@ module Beaker
     def create_cloud_init_secret(host, cloud_init_data)
       raise 'Cloud-init data must be provided' unless cloud_init_data
 
-      secret_name = "#{host['vm_name']}-cloud-init"
+      secret_name = bounded_k8s_name("#{host['vm_name']}-cloud-init")
       @logger.debug("Creating cloud-init secret #{secret_name} in namespace #{@namespace}")
 
       secret_spec = {
