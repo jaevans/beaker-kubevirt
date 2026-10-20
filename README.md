@@ -87,6 +87,7 @@ CONFIG:
 | `kubevirt_readiness_probe_disabled` | Skip the VMI SSH readinessProbe. Default is `false` for pod-network modes and `true` for `multus` (where a probe from the virt-launcher netns typically can't reach a bridge-only guest). | No | mode-dependent | HOSTS (per-host), CONFIG |
 | `kubevirt_readiness_probe` | Probe tuning hash (snake_case keys): `initial_delay_seconds` (30), `period_seconds` (10), `timeout_seconds` (3), `failure_threshold` (60), `success_threshold` (1). The default failure budget (600s) accommodates slow Windows first-boots. When the probe is enabled, `timeout` is auto-raised to cover this budget. | No | see description | HOSTS (per-host), CONFIG |
 | `kubevirt_disable_virtio` | Disable virtio devices (for Windows compatibility). If set to true the disk bus will be set to `sata` and the network adapter will be model `e1000` | No | `false` | HOSTS (per-host) |
+| `kubevirt_disk_cache` | Cache mode for the root disk: `none`, `writethrough` or `writeback`. Unset leaves the choice to KubeVirt (`none` when the backing store supports O_DIRECT). `writeback` lets the virt-launcher's page cache absorb guest writes until the guest flushes; use it for throwaway test VMs on slow or shared storage, where a lost VM only costs a re-run. | No | unset | HOSTS (per-host), CONFIG |
 
 **Important**: The `namespace`, `kubeconfig`, and `kubecontext` options must be specified in the global `CONFIG` section, not per-host. All VMs will be created in the same Kubernetes namespace.
 

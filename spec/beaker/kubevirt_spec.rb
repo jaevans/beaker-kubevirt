@@ -1683,6 +1683,60 @@ RSpec.describe Beaker::Kubevirt do
     end
   end
 
+  describe '#disk_cache' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+
+    context 'when not set' do
+      let(:host) { { 'name' => 'test-host' } }
+
+      it 'returns nil' do
+        expect(hypervisor.send(:disk_cache, host)).to be_nil
+      end
+    end
+
+    context 'when set per host' do
+      let(:host) { { 'name' => 'test-host', 'kubevirt_disk_cache' => 'writeback' } }
+
+      it 'returns the host value' do
+        expect(hypervisor.send(:disk_cache, host)).to eq('writeback')
+      end
+    end
+
+    context 'when set globally' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+      let(:host) { { 'name' => 'test-host' } }
+
+      it 'falls back to the CONFIG value' do
+        expect(hypervisor.send(:disk_cache, host)).to eq('writethrough')
+      end
+    end
+
+    context 'when set both per host and globally' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+      let(:host) { { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' } }
+
+      it 'prefers the host value' do
+        expect(hypervisor.send(:disk_cache, host)).to eq('none')
+      end
+    end
+
+    context 'when set to an empty string' do
+      let(:host) { { 'name' => 'test-host', 'kubevirt_disk_cache' => '' } }
+
+      it 'returns nil' do
+        expect(hypervisor.send(:disk_cache, host)).to be_nil
+      end
+    end
+
+    context 'when set to an unsupported value' do
+      let(:host) { { 'name' => 'test-host', 'kubevirt_disk_cache' => 'unsafe' } }
+
+      it 'raises ArgumentError' do
+        expect { hypervisor.send(:disk_cache, host) }.to raise_error(ArgumentError, /kubevirt_disk_cache must be one of none, writethrough, writeback/)
+      end
+    end
+  end
+
   describe '#generate_hardware_spec' do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:host) { { 'name' => 'test-host', 'platform' => 'el-8-x86_64' } }
@@ -1715,6 +1769,23 @@ RSpec.describe Beaker::Kubevirt do
       it 'includes network interface with e1000 model' do
         result = hypervisor.send(:generate_hardware_spec, host)
         expect(result['interfaces'][0]['model']).to eq('e1000')
+      end
+    end
+
+    context 'with the default cache mode' do
+      it 'leaves cache unset on the root disk' do
+        result = hypervisor.send(:generate_hardware_spec, host)
+        expect(result['disks'][0]).not_to have_key('cache')
+      end
+    end
+
+    context 'with a cache mode set' do
+      let(:host) { { 'name' => 'test-host', 'platform' => 'el-8-x86_64', 'kubevirt_disk_cache' => 'writeback' } }
+
+      it 'sets cache on the root disk only' do
+        result = hypervisor.send(:generate_hardware_spec, host)
+        expect(result['disks'][0]['cache']).to eq('writeback')
+        expect(result['disks'][1]).not_to have_key('cache')
       end
     end
 
