@@ -22,6 +22,17 @@ RSpec.describe Beaker::Kubevirt do
   end
 
   let(:kubevirt_helper) { instance_double(Beaker::KubevirtHelper) }
+  # Pin BEAKER_KUBEVIRT_TEST_GROUP for every example, so a value in the
+  # developer's own environment cannot change the identifier under test.
+  let(:env_value) { nil }
+
+  around do |example|
+    previous = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', nil)
+    ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = env_value
+    example.run
+  ensure
+    ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
+  end
 
   before do
     allow(Beaker::KubevirtHelper).to receive(:new).and_return(kubevirt_helper)
@@ -30,16 +41,6 @@ RSpec.describe Beaker::Kubevirt do
 
   describe '#initialize' do
     let(:hypervisor) { described_class.new(hosts, options) }
-    # Pin BEAKER_KUBEVIRT_TEST_GROUP for every example here, so a value in the
-    # developer's own environment cannot change the identifier under test.
-    let(:env_value) { nil }
-
-    around do |example|
-      previous = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', nil)
-      ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = env_value
-      example.run
-      ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
-    end
 
     def identifier_for(opts = options)
       described_class.new(hosts, opts).instance_variable_get(:@test_group_identifier)
@@ -90,6 +91,16 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'falls back to a generated identifier' do
         expect(identifier_for).to match(/^beaker-[a-f0-9]{8}$/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP has surrounding whitespace' do
+      let(:env_value) { ' beaker-ci-123 ' }
+      let(:logger) { instance_double(Logger).as_null_object }
+
+      it 'strips it and warns that the identifier was changed' do
+        expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-123')
+        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
       end
     end
 
@@ -1603,6 +1614,18 @@ RSpec.describe Beaker::Kubevirt do
         host_obj = double(name: 'object-host')
         result = hypervisor.send(:generate_vm_name, host_obj)
         expect(result).to include('object-host')
+      end
+    end
+
+    context 'with a maximum-length BEAKER_KUBEVIRT_TEST_GROUP' do
+      let(:env_value) { 'a' * 63 }
+
+      it 'gives each host a distinct name within the DNS label limit' do
+        names = %w[host1 host2].map { |n| hypervisor.send(:generate_vm_name, { 'name' => n }) }
+
+        expect(names.uniq.size).to eq(2)
+        expect(names).to all(have_attributes(length: be <= 63))
+        expect(names).to all(match(/\A[a-z][a-z0-9-]*[a-z0-9]\z/))
       end
     end
   end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'securerandom'
+require 'digest'
 require 'yaml'
 require 'base64'
 require 'socket'
@@ -342,7 +343,15 @@ module Beaker
     # @return [String] The generated VM name
     def generate_vm_name(host)
       host_name = host.respond_to?(:name) ? host.name : host['name']
-      sanitize_k8s_name("#{@test_group_identifier}-#{host_name}")
+      full_name = "#{@test_group_identifier}-#{host_name}"
+      name = sanitize_k8s_name(full_name)
+      return name if name.length < 63
+
+      # At the 63-char cap the host name may have been truncated away, so hosts
+      # sharing a long test-group identifier would collide. A digest of the
+      # untruncated name keeps each host's VM (and derived Secret) unique.
+      digest = Digest::SHA256.hexdigest(full_name)[0, 8]
+      "#{name[0, 63 - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
     end
 
     ##
@@ -460,8 +469,8 @@ module Beaker
     #
     # @return [String, nil] the sanitized identifier, or nil when unset or blank
     def configured_test_group_identifier
-      raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '').strip
-      return nil if raw.empty?
+      raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '')
+      return nil if raw.strip.empty?
 
       identifier = sanitize_k8s_label_value(raw)
       if identifier != raw
