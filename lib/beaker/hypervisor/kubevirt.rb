@@ -61,6 +61,8 @@ module Beaker
     TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
     # Fields a kubevirt_tolerations entry may set
     TOLERATION_FIELDS = %w[key value effect].freeze
+    # Labels beaker sets itself; cleanup and the NodePort service select on them
+    RESERVED_LABEL_KEYS = %w[beaker/test-group beaker/host kubevirt.io/vm].freeze
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff].freeze
     # virt-launcher container waiting reasons that mean an image pull is being
@@ -567,10 +569,60 @@ module Beaker
 
     def get_labels(host)
       raw_name = host.respond_to?(:name) ? host.name : host['name']
-      {
+      user_labels(host).merge(
         'beaker/test-group' => @test_group_identifier,
         'beaker/host' => sanitize_k8s_label_value(raw_name),
-      }
+      )
+    end
+
+    ##
+    # Extra labels for every resource that carries beaker's own labels, from
+    # BEAKER_kubevirt_labels, the host or the global CONFIG, in that order.
+    # Cleanup finds resources by beaker/test-group, so the keys beaker sets
+    # itself are refused rather than silently overridden.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}] The labels, empty when unset
+    def user_labels(host)
+      labels = key_value_option(host, 'kubevirt_labels')
+      reserved = labels.keys & RESERVED_LABEL_KEYS
+      raise ArgumentError, "kubevirt_labels may not set #{reserved.join(', ')}; beaker sets those itself" unless reserved.empty?
+
+      labels
+    end
+
+    ##
+    # Extra annotations for the VM template, and so for the VMI and its
+    # virt-launcher pod, from BEAKER_kubevirt_annotations, the host or the
+    # global CONFIG, in that order.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}, nil] The annotations, or nil when unset
+    def user_annotations(host)
+      annotations = key_value_option(host, 'kubevirt_annotations')
+      annotations unless annotations.empty?
+    end
+
+    ##
+    # A hash option that BEAKER_<name> may replace with a comma-separated list
+    # of key=value pairs. Only the first = in a pair separates key from value.
+    # @param [Host] host The host configuration
+    # @param [String] name The option name
+    # @return [Hash{String=>String}] The option, empty when unset
+    def key_value_option(host, name)
+      env = env_option(name)
+      value = env ? parse_key_values(name, env) : host[name] || @options[name.to_sym]
+      return {} if value.nil? || value.empty?
+      raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
+
+      value.to_h { |key, val| [key.to_s, val.to_s] }
+    end
+
+    def parse_key_values(name, value)
+      value.split(',').map(&:strip).reject(&:empty?).to_h do |pair|
+        key, val = pair.split('=', 2).map(&:strip)
+        raise ArgumentError, "BEAKER_#{name} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
+
+        [key, val]
+      end
     end
 
     ##
@@ -832,7 +884,8 @@ module Beaker
               'labels' => get_labels(host).merge({
                                                    'kubevirt.io/vm' => vm_name,
                                                  }),
-            },
+              'annotations' => user_annotations(host),
+            }.compact,
             'spec' => {
               'domain' => {
                 'cpu' => {
