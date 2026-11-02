@@ -1735,6 +1735,47 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:disk_cache, host) }.to raise_error(ArgumentError, /kubevirt_disk_cache must be one of none, writethrough, writeback/)
       end
     end
+
+    context 'when BEAKER_kubevirt_disk_cache is set' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = ' writeback '
+      end
+
+      after do
+        ENV.delete('BEAKER_kubevirt_disk_cache')
+      end
+
+      it 'is used when nothing else is set' do
+        expect(described_class.new(hosts, options).send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
+      end
+
+      it 'overrides the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' })).to eq('writeback')
+      end
+
+      it 'is validated' do
+        ENV['BEAKER_kubevirt_disk_cache'] = 'unsafe'
+        expect { hypervisor.send(:disk_cache, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /got "unsafe"/)
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is blank' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = '  '
+      end
+
+      after do
+        ENV.delete('BEAKER_kubevirt_disk_cache')
+      end
+
+      it 'falls through to the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host' })).to eq('writethrough')
+      end
+    end
   end
 
   describe '#generate_hardware_spec' do

@@ -489,7 +489,20 @@ module Beaker
     end
 
     ##
-    # Cache mode for the root disk, from the host or the global CONFIG.
+    # The value of the BEAKER_<name> environment variable, which overrides the
+    # host and CONFIG settings of the option it names so that a CI environment
+    # can set it for every nodeset it runs, as beaker-google's BEAKER_gce_*
+    # variables do.
+    # @param [String] name The option name, e.g. 'kubevirt_disk_cache'
+    # @return [String, nil] The stripped value, or nil when unset or blank
+    def env_option(name)
+      value = ENV.fetch("BEAKER_#{name}", nil)&.strip
+      value unless value.nil? || value.empty?
+    end
+
+    ##
+    # Cache mode for the root disk, from BEAKER_kubevirt_disk_cache, the host
+    # or the global CONFIG, in that order.
     # Unset leaves the choice to KubeVirt, which uses none when the backing
     # store supports O_DIRECT and writethrough otherwise. writeback lets the
     # virt-launcher's page cache absorb guest writes until the guest flushes,
@@ -497,7 +510,7 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
     def disk_cache(host)
-      cache = host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      cache = env_option('kubevirt_disk_cache') || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
       return nil if cache.nil? || cache.to_s.empty?
 
       cache = cache.to_s
