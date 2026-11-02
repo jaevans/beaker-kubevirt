@@ -57,6 +57,8 @@ module Beaker
 
     # Values KubeVirt accepts for a disk's cache mode
     DISK_CACHE_MODES = %w[none writethrough writeback].freeze
+    # Taint effects a toleration may name
+    TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
     # virt-launcher container termination reasons we treat as fatal.
@@ -600,6 +602,71 @@ module Beaker
     end
 
     ##
+    # Node labels the VM's pod must match, from BEAKER_kubevirt_node_selector,
+    # the host or the global CONFIG, in that order. The variable is a
+    # comma-separated list of key=value pairs.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}, nil] The selector, or nil when unset
+    def node_selector(host)
+      env = env_option('kubevirt_node_selector')
+      selector = env ? parse_node_selector(env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
+      return nil if selector.nil? || selector.empty?
+      raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
+
+      selector.to_h { |key, value| [key.to_s, value.to_s] }
+    end
+
+    def parse_node_selector(value)
+      value.split(',').map(&:strip).reject(&:empty?).to_h do |pair|
+        key, label = pair.split('=', 2).map(&:strip)
+        raise ArgumentError, "BEAKER_kubevirt_node_selector entries must be key=value, got #{pair.inspect}" if label.nil? || key.empty?
+
+        [key, label]
+      end
+    end
+
+    ##
+    # Tolerations for the VM's pod, from BEAKER_kubevirt_tolerations, the host
+    # or the global CONFIG, in that order. Each entry has a key, an effect and
+    # an optional value; one without a value tolerates the key whatever its
+    # value. The variable is a comma-separated list of key=value:Effect or
+    # key:Effect entries.
+    # @param [Host] host The host configuration
+    # @return [Array<Hash>, nil] Kubernetes tolerations, or nil when unset
+    def tolerations(host)
+      env = env_option('kubevirt_tolerations')
+      list = env ? parse_tolerations(env) : host['kubevirt_tolerations'] || @options[:kubevirt_tolerations]
+      return nil if list.nil? || list.empty?
+      raise ArgumentError, "kubevirt_tolerations must be a list of key/value/effect entries, got #{list.inspect}" unless list.is_a?(Array)
+
+      list.map { |entry| build_toleration(entry) }
+    end
+
+    def parse_tolerations(value)
+      value.split(',').map(&:strip).reject(&:empty?).map do |entry|
+        taint, separator, effect = entry.rpartition(':')
+        raise ArgumentError, "BEAKER_kubevirt_tolerations entries must be key=value:Effect or key:Effect, got #{entry.inspect}" if separator.empty?
+
+        key, toleration_value = taint.split('=', 2)
+        { 'key' => key, 'value' => toleration_value, 'effect' => effect }
+      end
+    end
+
+    def build_toleration(entry)
+      raise ArgumentError, "Each kubevirt_tolerations entry must be a hash, got #{entry.inspect}" unless entry.is_a?(Hash)
+
+      key, value, effect = %w[key value effect].map { |field| (entry[field] || entry[field.to_sym]).to_s.strip }
+      raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
+      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless TOLERATION_EFFECTS.include?(effect)
+
+      if value.empty?
+        { 'key' => key, 'operator' => 'Exists', 'effect' => effect }
+      else
+        { 'key' => key, 'operator' => 'Equal', 'value' => value, 'effect' => effect }
+      end
+    end
+
+    ##
     # Generate the hardware devices specification for the VM
     # @param [Host] host The host configuration
     # @return [Hash] Hardware devices specification
@@ -721,6 +788,8 @@ module Beaker
                 },
               },
               'hostname' => host_name,
+              'nodeSelector' => node_selector(host),
+              'tolerations' => tolerations(host),
               'networks' => generate_networks_spec(host),
               'readinessProbe' => generate_readiness_probe_spec(host),
               'volumes' => [
