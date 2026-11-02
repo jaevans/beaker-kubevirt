@@ -1178,6 +1178,35 @@ RSpec.describe Beaker::Kubevirt do
     end
   end
 
+  describe '#storage_class' do
+    let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_storage_class: 'from-config')) }
+
+    after do
+      ENV.delete('BEAKER_kubevirt_storage_class')
+    end
+
+    it 'returns nil when not set' do
+      expect(described_class.new(hosts, options).send(:storage_class, { 'name' => 'test-host' })).to be_nil
+    end
+
+    it 'falls back to the CONFIG value' do
+      expect(hypervisor.send(:storage_class, { 'name' => 'test-host' })).to eq('from-config')
+    end
+
+    it 'prefers the host value over CONFIG' do
+      expect(hypervisor.send(:storage_class, { 'name' => 'test-host', 'kubevirt_storage_class' => 'from-host' })).to eq('from-host')
+    end
+
+    it 'treats a blank host value as unset' do
+      expect(described_class.new(hosts, options).send(:storage_class, { 'name' => 'test-host', 'kubevirt_storage_class' => ' ' })).to be_nil
+    end
+
+    it 'lets BEAKER_kubevirt_storage_class override the host and CONFIG values' do
+      ENV['BEAKER_kubevirt_storage_class'] = ' from-env '
+      expect(hypervisor.send(:storage_class, { 'name' => 'test-host', 'kubevirt_storage_class' => 'from-host' })).to eq('from-env')
+    end
+  end
+
   describe '#generate_root_volume_dvtemplate' do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:vm_name) { 'test-vm-123' }
@@ -1220,6 +1249,16 @@ RSpec.describe Beaker::Kubevirt do
         result = hypervisor.send(:generate_root_volume_dvtemplate, vm_image, host)
         dv = result[0]
         expect(dv['spec']['storage']['accessModes']).to eq(['ReadWriteOnce'])
+      end
+
+      it 'leaves storageClassName to the cluster default when unset' do
+        dv = hypervisor.send(:generate_root_volume_dvtemplate, vm_image, host)[0]
+        expect(dv['spec']['storage']).not_to have_key('storageClassName')
+      end
+
+      it 'sets storageClassName from kubevirt_storage_class' do
+        dv = hypervisor.send(:generate_root_volume_dvtemplate, vm_image, host.merge('kubevirt_storage_class' => 'single-replica'))[0]
+        expect(dv['spec']['storage']['storageClassName']).to eq('single-replica')
       end
 
       it 'sets default storage size of 10Gi for HTTP sources' do
