@@ -355,6 +355,50 @@ RSpec.describe Beaker::Kubevirt do
         options[:kubevirt_memory_request] = '2Gi'
         expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'memory')).to eq('2Gi')
       end
+
+      it 'omits the cpu request by default' do
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests')).not_to have_key('cpu')
+      end
+
+      it 'omits the cpu limit by default' do
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits')).not_to have_key('cpu')
+      end
+
+      it 'respects an overridden kubevirt_cpu_request' do
+        options[:kubevirt_cpu_request] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'respects a per-host kubevirt_cpu_request' do
+        hosts[0]['kubevirt_cpu_request'] = '1500m'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('1500m')
+      end
+
+      it 'respects an overridden kubevirt_cpu_limit' do
+        options[:kubevirt_cpu_limit] = '4'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits', 'cpu')).to eq('4')
+      end
+
+      it 'respects a per-host kubevirt_cpu_limit' do
+        hosts[0]['kubevirt_cpu_limit'] = '3500m'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits', 'cpu')).to eq('3500m')
+      end
+
+      it 'stringifies a numeric cpu request' do
+        options[:kubevirt_cpu_request] = 2
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'prefers the per-host cpu request over the global option' do
+        options[:kubevirt_cpu_request] = '1'
+        hosts[0]['kubevirt_cpu_request'] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'leaves the memory request untouched when only cpu is set' do
+        options[:kubevirt_cpu_request] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'memory')).to eq('4Gi')
+      end
     end
 
     context 'with the SSH readinessProbe' do
