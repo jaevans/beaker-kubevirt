@@ -2184,10 +2184,6 @@ RSpec.describe Beaker::Kubevirt do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:pool) { { 'node-pool.example.com/ci' => 'true' } }
 
-    after do
-      ENV.delete('BEAKER_kubevirt_node_selector')
-    end
-
     it 'returns nil when not set' do
       expect(hypervisor.send(:node_selector, { 'name' => 'test-host' })).to be_nil
     end
@@ -2220,6 +2216,11 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /must be a hash/)
     end
 
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => 5 }) }
+        .to raise_error(ArgumentError, /must be a hash of label keys to values, got 5/)
+    end
+
     it 'parses BEAKER_kubevirt_node_selector and lets it replace the host value' do
       ENV['BEAKER_kubevirt_node_selector'] = ' node-pool.example.com/ci=true , zone = a '
       host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'other' => 'x' } }
@@ -2241,10 +2242,6 @@ RSpec.describe Beaker::Kubevirt do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:ci_taint) { { 'key' => 'node-pool.example.com/ci', 'value' => 'true', 'effect' => 'NoSchedule' } }
     let(:ci_toleration) { { 'key' => 'node-pool.example.com/ci', 'operator' => 'Equal', 'value' => 'true', 'effect' => 'NoSchedule' } }
-
-    after do
-      ENV.delete('BEAKER_kubevirt_tolerations')
-    end
 
     it 'returns nil when not set' do
       expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to be_nil
@@ -2282,6 +2279,15 @@ RSpec.describe Beaker::Kubevirt do
     it 'raises ArgumentError when not a list' do
       host = { 'name' => 'test-host', 'kubevirt_tolerations' => ci_taint }
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /must be a list/)
+    end
+
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => true }) }
+        .to raise_error(ArgumentError, /must be a list of key.value.effect entries, got true/)
+    end
+
+    it 'returns nil for an empty list' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [] })).to be_nil
     end
 
     it 'parses BEAKER_kubevirt_tolerations and lets it replace the host value' do

@@ -610,8 +610,9 @@ module Beaker
     def node_selector(host)
       env = env_option('kubevirt_node_selector')
       selector = env ? parse_node_selector(env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
-      return nil if selector.nil? || selector.empty?
+      return nil if selector.nil?
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
+      return nil if selector.empty?
 
       selector.to_h { |key, value| [key.to_s, value.to_s] }
     end
@@ -636,8 +637,9 @@ module Beaker
     def tolerations(host)
       env = env_option('kubevirt_tolerations')
       list = env ? parse_tolerations(env) : host['kubevirt_tolerations'] || @options[:kubevirt_tolerations]
-      return nil if list.nil? || list.empty?
+      return nil if list.nil?
       raise ArgumentError, "kubevirt_tolerations must be a list of key/value/effect entries, got #{list.inspect}" unless list.is_a?(Array)
+      return nil if list.empty?
 
       list.map { |entry| build_toleration(entry) }
     end
