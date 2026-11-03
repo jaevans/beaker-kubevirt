@@ -2254,10 +2254,6 @@ RSpec.describe Beaker::Kubevirt do
     end
 
     context 'with kubevirt_labels' do
-      after do
-        ENV.delete('BEAKER_kubevirt_labels')
-      end
-
       it 'adds host labels alongside beaker labels' do
         result = hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'infra' }))
         expect(result).to include('team' => 'infra', 'beaker/host' => 'test-host')
@@ -2293,6 +2289,45 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => ['team=infra'])) }.to raise_error(ArgumentError, /must be a hash/)
       end
 
+      it 'raises ArgumentError for a scalar' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => 5)) }
+          .to raise_error(ArgumentError, /kubevirt_labels must be a hash of keys to values, got 5/)
+      end
+
+      it 'accepts prefixed keys and empty values' do
+        labels = { 'example.com/team' => 'infra', 'empty' => '', 'a' * 63 => 'b' * 63 }
+        expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => labels))).to include(labels)
+      end
+
+      [
+        ['contains a space', 'QA team'],
+        ['is longer than 63 characters', 'a' * 64],
+        ['ends with a hyphen', 'infra-'],
+      ].each do |description, value|
+        it "raises ArgumentError naming the label when a value #{description}" do
+          expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => value })) }
+            .to raise_error(ArgumentError, /kubevirt_labels value for "team" must be at most 63 characters.*got #{Regexp.escape(value.inspect)}/)
+        end
+      end
+
+      [
+        ['has a space', 'my team'],
+        ['has an empty name', 'example.com/'],
+        ['has an invalid prefix', 'Example_Com/team'],
+        ['has two slashes', 'a/b/c'],
+        ['has a name longer than 63 characters', 'a' * 64],
+      ].each do |description, key|
+        it "raises ArgumentError naming the key when it #{description}" do
+          expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { key => 'x' })) }
+            .to raise_error(ArgumentError, /kubevirt_labels key #{Regexp.escape(key.inspect)} is not a valid Kubernetes key/)
+        end
+      end
+
+      it 'validates BEAKER_kubevirt_labels values' do
+        ENV['BEAKER_kubevirt_labels'] = 'team=QA team'
+        expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, /value for "team"/)
+      end
+
       %w[beaker/test-group beaker/host kubevirt.io/vm].each do |key|
         it "refuses to set #{key}" do
           expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { key => 'mine' })) }
@@ -2306,16 +2341,27 @@ RSpec.describe Beaker::Kubevirt do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:evict) { { 'cluster-autoscaler.kubernetes.io/safe-to-evict' => 'false' } }
 
-    after do
-      ENV.delete('BEAKER_kubevirt_annotations')
-    end
-
     it 'returns nil when not set' do
       expect(hypervisor.send(:user_annotations, { 'name' => 'test-host' })).to be_nil
     end
 
     it 'returns the host value' do
       expect(hypervisor.send(:user_annotations, { 'name' => 'test-host', 'kubevirt_annotations' => evict })).to eq(evict)
+    end
+
+    it 'allows any annotation value' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note' => 'QA team, see #42' } }
+      expect(hypervisor.send(:user_annotations, host)).to eq('example.com/note' => 'QA team, see #42')
+    end
+
+    it 'raises ArgumentError for an invalid annotation key' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'my note' => 'x' } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations key "my note"/)
+    end
+
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:user_annotations, { 'name' => 'test-host', 'kubevirt_annotations' => 'x' }) }
+        .to raise_error(ArgumentError, /must be a hash/)
     end
 
     it 'falls back to the CONFIG value' do

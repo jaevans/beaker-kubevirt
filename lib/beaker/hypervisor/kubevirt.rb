@@ -63,6 +63,11 @@ module Beaker
     TOLERATION_FIELDS = %w[key value effect].freeze
     # Labels beaker sets itself; cleanup and the NodePort service select on them
     RESERVED_LABEL_KEYS = %w[beaker/test-group beaker/host kubevirt.io/vm].freeze
+    # Kubernetes label values, and the name part of label and annotation keys
+    LABEL_NAME_RE = /\A(?:[A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]\z/
+    # The optional prefix of a label or annotation key (an RFC 1123 subdomain)
+    KEY_PREFIX_RE = /\A[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*\z/
+    KEY_PREFIX_MAX = 253
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff].freeze
     # virt-launcher container waiting reasons that mean an image pull is being
@@ -587,6 +592,12 @@ module Beaker
       reserved = labels.keys & RESERVED_LABEL_KEYS
       raise ArgumentError, "kubevirt_labels may not set #{reserved.join(', ')}; beaker sets those itself" unless reserved.empty?
 
+      labels.each do |key, value|
+        next if value.empty? || (value.length <= LABEL_VALUE_MAX && LABEL_NAME_RE.match?(value))
+
+        raise ArgumentError, "kubevirt_labels value for #{key.inspect} must be at most #{LABEL_VALUE_MAX} characters of " \
+                             "letters, digits, '-', '_' or '.', starting and ending with a letter or digit, got #{value.inspect}"
+      end
       labels
     end
 
@@ -610,10 +621,32 @@ module Beaker
     def key_value_option(host, name)
       env = env_option(name)
       value = env ? parse_key_values(name, env) : host[name] || @options[name.to_sym]
-      return {} if value.nil? || value.empty?
+      return {} if value.nil?
       raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
 
-      value.to_h { |key, val| [key.to_s, val.to_s] }
+      value.to_h do |key, val|
+        key = key.to_s
+        unless qualified_key?(key)
+          raise ArgumentError, "#{name} key #{key.inspect} is not a valid Kubernetes key: expected an optional DNS subdomain " \
+                               "prefix and '/', then a name of at most #{LABEL_VALUE_MAX} characters of letters, digits, " \
+                               "'-', '_' or '.', starting and ending with a letter or digit"
+        end
+
+        [key, val.to_s]
+      end
+    end
+
+    ##
+    # Whether a string is a valid label or annotation key: an optional
+    # DNS-subdomain prefix and '/', then a name. The API server rejects
+    # anything else with a 422, deep into provisioning.
+    # @param [String] key
+    # @return [Boolean]
+    def qualified_key?(key)
+      prefix, slash, name = key.rpartition('/')
+      return false unless name.length <= LABEL_VALUE_MAX && LABEL_NAME_RE.match?(name)
+
+      slash.empty? || (prefix.length <= KEY_PREFIX_MAX && KEY_PREFIX_RE.match?(prefix))
     end
 
     def parse_key_values(name, value)
