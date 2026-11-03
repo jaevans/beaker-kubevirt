@@ -39,5 +39,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'faye-websocket', '~> 0.12'
   spec.add_dependency 'kubeclient', '>= 4.9.3', '< 5.0.0'
   spec.add_dependency 'pstore', '~> 0.1'
-  spec.add_development_dependency 'voxpupuli-rubocop', '~> 5.2.0'
+  spec.add_development_dependency 'voxpupuli-rubocop', '~> 5.3.0'
 end
