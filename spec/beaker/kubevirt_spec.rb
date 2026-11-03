@@ -22,6 +22,17 @@ RSpec.describe Beaker::Kubevirt do
   end
 
   let(:kubevirt_helper) { instance_double(Beaker::KubevirtHelper) }
+  # BEAKER_<option> variables override host and CONFIG settings. Clear them for
+  # every example so a value exported in the developer's environment cannot
+  # change the results, and restore it afterwards.
+  let(:beaker_env_options) { %w[BEAKER_kubevirt_disk_cache] }
+
+  around do |example|
+    saved = beaker_env_options.to_h { |name| [name, ENV.delete(name)] }
+    example.run
+  ensure
+    saved&.each { |name, value| ENV[name] = value }
+  end
 
   before do
     allow(Beaker::KubevirtHelper).to receive(:new).and_return(kubevirt_helper)
@@ -1743,10 +1754,6 @@ RSpec.describe Beaker::Kubevirt do
         ENV['BEAKER_kubevirt_disk_cache'] = ' writeback '
       end
 
-      after do
-        ENV.delete('BEAKER_kubevirt_disk_cache')
-      end
-
       it 'is used when nothing else is set' do
         expect(described_class.new(hosts, options).send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
       end
@@ -1754,9 +1761,14 @@ RSpec.describe Beaker::Kubevirt do
       it 'overrides the host and CONFIG values' do
         expect(hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' })).to eq('writeback')
       end
+    end
 
-      it 'is validated' do
+    context 'when BEAKER_kubevirt_disk_cache is invalid' do
+      before do
         ENV['BEAKER_kubevirt_disk_cache'] = 'unsafe'
+      end
+
+      it 'raises ArgumentError' do
         expect { hypervisor.send(:disk_cache, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /got "unsafe"/)
       end
     end
@@ -1766,10 +1778,6 @@ RSpec.describe Beaker::Kubevirt do
 
       before do
         ENV['BEAKER_kubevirt_disk_cache'] = '  '
-      end
-
-      after do
-        ENV.delete('BEAKER_kubevirt_disk_cache')
       end
 
       it 'falls through to the host and CONFIG values' do
