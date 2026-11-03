@@ -1181,6 +1181,7 @@ module Beaker
 
       key = "#{pod_name}/#{container}"
       now = monotonic_time
+      first_seen = !@image_pull_backoff_since.key?(key)
       @image_pull_backoff_since[key] ||= now
       elapsed = (now - @image_pull_backoff_since[key]).round
 
@@ -1189,8 +1190,15 @@ module Beaker
               "exceeding the :kubevirt_image_pull_grace window of #{grace}s: #{message}"
       end
 
-      @logger.debug("virt-launcher container #{container} for #{vm_name} is #{reason} " \
-                    "(#{elapsed}s of #{grace}s grace); waiting for kubelet to retry the pull")
+      # Warn on first sight: when the ready timeout expires before the window
+      # does, this is the only record of why the VM never became ready.
+      if first_seen
+        @logger.warn("virt-launcher container #{container} for #{vm_name} is #{reason}, allowing #{grace}s " \
+                     "for kubelet to retry the pull: #{message}")
+      else
+        @logger.debug("virt-launcher container #{container} for #{vm_name} is #{reason} " \
+                      "(#{elapsed}s of #{grace}s grace); waiting for kubelet to retry the pull")
+      end
     end
 
     ##
@@ -1201,9 +1209,13 @@ module Beaker
     # @param [Host] host The host being provisioned
     # @return [Integer] seconds
     def image_pull_grace(host)
-      host['kubevirt_image_pull_grace'] ||
-        @options[:kubevirt_image_pull_grace] ||
-        DEFAULT_IMAGE_PULL_GRACE
+      value = host['kubevirt_image_pull_grace'] || @options[:kubevirt_image_pull_grace]
+      return DEFAULT_IMAGE_PULL_GRACE if value.nil?
+
+      grace = Integer(value, exception: false)
+      raise ArgumentError, "kubevirt_image_pull_grace must be a whole number of seconds, got #{value.inspect}" if grace.nil?
+
+      grace
     end
 
     ##

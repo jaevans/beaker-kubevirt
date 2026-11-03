@@ -877,6 +877,37 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 901s/)
       end
 
+      it 'accepts a grace given as a string' do
+        hypervisor = described_class.new(hosts, options.merge(timeout: 600, kubevirt_image_pull_grace: '30'))
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 31)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 31s/)
+      end
+
+      it 'rejects a grace that is not a whole number' do
+        host['kubevirt_image_pull_grace'] = '10m'
+        allow(kubevirt_helper).to receive_messages(
+          get_vmi: pending_vmi,
+          get_virt_launcher_pod: waiting_pod('ImagePullBackOff'),
+        )
+        expect { hypervisor.send(:wait_for_vm_ready, host) }
+          .to raise_error(ArgumentError, /kubevirt_image_pull_grace must be a whole number of seconds, got "10m"/)
+      end
+
+      it 'warns the first time it sees the backoff and logs at debug after that' do
+        logger = options[:logger]
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
+          .and_return(waiting_pod('ImagePullBackOff'), waiting_pod('ImagePullBackOff'), nil)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 100)
+        expect(logger).to receive(:warn).with(/volumerootdisk-init for test-vm is ImagePullBackOff, allowing 600s .*EOF/).once
+        expect(logger).to receive(:debug).with(/ImagePullBackOff \(100s of 600s grace\)/).once
+        hypervisor.send(:wait_for_vm_ready, host)
+      end
+
       it 'restarts the grace window when the container leaves the backoff' do
         healthy_pod = { 'metadata' => { 'name' => 'virt-launcher-test-vm-aaaaa' }, 'status' => { 'phase' => 'Running', 'initContainerStatuses' => [{ 'name' => 'volumerootdisk-init', 'state' => { 'running' => {} } }] } }
         backoff_pod = waiting_pod('ImagePullBackOff')
