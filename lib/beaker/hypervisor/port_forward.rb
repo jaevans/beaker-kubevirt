@@ -547,7 +547,7 @@ class KubeVirtPortForwarder
   end
 
   # Manages state transitions with thread safety.
-  # rubocop:disable Naming/PredicateMethod
+  # rubocop:disable-next Naming/PredicateMethod
   def state_transition_to(new_state)
     @mutex.synchronize do
       case new_state
@@ -564,7 +564,6 @@ class KubeVirtPortForwarder
     end
     true
   end
-  # rubocop:enable Naming/PredicateMethod
 
   # Convert kubeclient SSL options to Faye::WebSocket/EventMachine TLS options.
   # @param ssl_options [Hash] The SSL options from kubeclient
