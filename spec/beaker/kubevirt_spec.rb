@@ -1181,10 +1181,6 @@ RSpec.describe Beaker::Kubevirt do
   describe '#storage_class' do
     let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_storage_class: 'from-config')) }
 
-    after do
-      ENV.delete('BEAKER_kubevirt_storage_class')
-    end
-
     it 'returns nil when not set' do
       expect(described_class.new(hosts, options).send(:storage_class, { 'name' => 'test-host' })).to be_nil
     end
