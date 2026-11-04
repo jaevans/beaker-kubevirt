@@ -86,6 +86,15 @@ RSpec.describe Beaker::Kubevirt do
       end
     end
 
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is longer than 63 characters' do
+      let(:env_value) { "beaker-#{'x' * 50}-matrix-leg-7" }
+
+      it 'raises instead of truncating it' do
+        expect { described_class.new(hosts, options) }
+          .to raise_error(ArgumentError, /BEAKER_KUBEVIRT_TEST_GROUP must be at most 63 characters, got #{env_value.length}/)
+      end
+    end
+
     context 'when BEAKER_KUBEVIRT_TEST_GROUP is blank' do
       let(:env_value) { '   ' }
 
@@ -1522,12 +1531,20 @@ RSpec.describe Beaker::Kubevirt do
       end
 
       %w[http://example.com/fedora-disk.qcow2 my-pvc].each do |image|
-        it "keeps dv_name a valid, distinct DNS label for #{image}" do
+        it "keeps dv_name a valid DNS label, distinct per VM, for #{image}" do
           options[:kubevirt_vm_image] = image
+          other_host = { 'name' => 'test-host-2', 'platform' => 'el-8-x86_64' }
+          def other_host.name
+            self['name']
+          end
+          allow(hypervisor).to receive(:generate_vm_name).and_return(vm_name, "#{'a' * 56}-host2")
           hypervisor.send(:create_vm, host)
+          hypervisor.send(:create_vm, other_host)
 
-          expect(host['dv_name']).to match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/)
-          expect(host['dv_name']).not_to eq(vm_name)
+          names = [host['dv_name'], other_host['dv_name']]
+          expect(names).to all(match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/))
+          expect(names).to all(have_attributes(length: be <= 63))
+          expect(names.uniq.size).to eq(2)
         end
       end
     end

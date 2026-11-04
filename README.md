@@ -269,7 +269,7 @@ This matters when something outside the beaker process has to clean up after it.
 kubectl -n "$namespace" delete vm,dv,secret,svc -l "beaker/test-group=beaker-ci-${CI_JOB_ID}"
 ```
 
-The identifier must be unique to each run that can be live at the same time. It names the VMs, DataVolumes and Secrets as well as labelling them, so two runs that share it collide on create, and either run's cleanup deletes the other's resources. `CI_JOB_ID` is unique per job on GitLab. On GitHub Actions, `GITHUB_RUN_ID` is not: every job and matrix leg of a run shares it, and so do re-run attempts. Combine it with the attempt, the job and the matrix index:
+The identifier must be unique to each run that can be live at the same time. It names the VMs, DataVolumes and Secrets as well as labelling them, so two runs that share it collide on create, and either run's cleanup deletes the other's resources. `CI_JOB_ID` is unique per job on GitLab. On GitHub Actions, `GITHUB_RUN_ID` is not: every job and matrix leg of a run shares it, and so do re-run attempts. Combine it with the attempt, the job and the matrix index, keeping the result within 63 characters (a longer value is refused rather than truncated, since truncation would cut off the part that tells runs apart):
 
 ```yaml
 env:

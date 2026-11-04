@@ -358,10 +358,10 @@ module Beaker
     # @return [String] A valid DNS label of at most 63 characters
     def bounded_k8s_name(full_name)
       name = sanitize_k8s_name(full_name)
-      return name if name.length < 63
+      return name if name.length < K8S_NAME_MAX
 
       digest = Digest::SHA256.hexdigest(full_name)[0, 8]
-      "#{name[0, 63 - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
+      "#{name[0, K8S_NAME_MAX - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
     end
 
     ##
@@ -482,9 +482,16 @@ module Beaker
       raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '')
       return nil if raw.strip.empty?
 
+      # Truncating would cut off the tail, which is usually the part that tells
+      # runs apart (job ID, matrix index), and give concurrent runs one label.
+      if raw.strip.length > LABEL_VALUE_MAX
+        raise ArgumentError, "BEAKER_KUBEVIRT_TEST_GROUP must be at most #{LABEL_VALUE_MAX} characters, " \
+                             "got #{raw.strip.length}: #{raw.inspect}"
+      end
+
       identifier = sanitize_k8s_label_value(raw)
       if identifier != raw
-        @logger&.warn(
+        @logger.warn(
           "BEAKER_KUBEVIRT_TEST_GROUP #{raw.inspect} is not usable as a Kubernetes " \
           "label value; using #{identifier.inspect} instead",
         )
