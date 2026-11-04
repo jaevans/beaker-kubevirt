@@ -2334,6 +2334,27 @@ RSpec.describe Beaker::Kubevirt do
             .to raise_error(ArgumentError, /kubevirt_labels may not set #{Regexp.escape(key)}/)
         end
       end
+
+      it 'raises ArgumentError for a nested value' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => { 'a' => 1 } })) }
+          .to raise_error(ArgumentError, /kubevirt_labels value for "team" must be a single value/)
+      end
+
+      it 'raises ArgumentError when BEAKER_kubevirt_labels has no entries' do
+        ENV['BEAKER_kubevirt_labels'] = ' , '
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'infra' })) }
+          .to raise_error(ArgumentError, /BEAKER_kubevirt_labels is set but has no key=value entries/)
+      end
+    end
+
+    context 'when test group is consistent' do
+      it 'uses the same test group for multiple hosts' do
+        host1 = { 'name' => 'host1' }
+        host2 = { 'name' => 'host2' }
+        labels1 = hypervisor.send(:get_labels, host1)
+        labels2 = hypervisor.send(:get_labels, host2)
+        expect(labels1['beaker/test-group']).to eq(labels2['beaker/test-group'])
+      end
     end
   end
 
@@ -2352,6 +2373,11 @@ RSpec.describe Beaker::Kubevirt do
     it 'allows any annotation value' do
       host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note' => 'QA team, see #42' } }
       expect(hypervisor.send(:user_annotations, host)).to eq('example.com/note' => 'QA team, see #42')
+    end
+
+    it 'raises ArgumentError for a nested value' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/cfg' => { 'a' => 1 } } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations value for "example.com.cfg" must be a single value/)
     end
 
     it 'raises ArgumentError for an invalid annotation key' do
@@ -2406,16 +2432,6 @@ RSpec.describe Beaker::Kubevirt do
       dv = hypervisor.send(:generate_root_volume_dvtemplate, 'https://example.com/disk.qcow2', host.merge('dv_name' => 'test-vm-disk'))[0]
       expect(dv.dig('metadata', 'labels')).to include('team' => 'infra')
       expect(dv['metadata']).not_to have_key('annotations')
-    end
-
-    context 'when test group is consistent' do
-      it 'uses the same test group for multiple hosts' do
-        host1 = { 'name' => 'host1' }
-        host2 = { 'name' => 'host2' }
-        labels1 = hypervisor.send(:get_labels, host1)
-        labels2 = hypervisor.send(:get_labels, host2)
-        expect(labels1['beaker/test-group']).to eq(labels2['beaker/test-group'])
-      end
     end
   end
 

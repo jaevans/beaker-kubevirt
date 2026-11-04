@@ -632,6 +632,8 @@ module Beaker
                                "'-', '_' or '.', starting and ending with a letter or digit"
         end
 
+        raise ArgumentError, "#{name} value for #{key.inspect} must be a single value, got #{val.inspect}" if val.is_a?(Hash) || val.is_a?(Array)
+
         [key, val.to_s]
       end
     end
@@ -650,7 +652,10 @@ module Beaker
     end
 
     def parse_key_values(name, value)
-      value.split(',').map(&:strip).reject(&:empty?).to_h do |pair|
+      pairs = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_#{name} is set but has no key=value entries: #{value.inspect}" if pairs.empty?
+
+      pairs.to_h do |pair|
         key, val = pair.split('=', 2).map(&:strip)
         raise ArgumentError, "BEAKER_#{name} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
 
