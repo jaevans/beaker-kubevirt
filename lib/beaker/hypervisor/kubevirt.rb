@@ -614,11 +614,25 @@ module Beaker
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
       return nil if selector.empty?
 
-      selector.to_h { |key, value| [key.to_s, value.to_s] }
+      selector.to_h do |key, value|
+        raise ArgumentError, "kubevirt_node_selector value for #{key.to_s.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
+
+        [key.to_s, value.to_s]
+      end
+    end
+
+    def scalar?(value)
+      case value
+      when String, Symbol, Numeric, true, false then true
+      else false
+      end
     end
 
     def parse_node_selector(value)
-      value.split(',').map(&:strip).reject(&:empty?).to_h do |pair|
+      pairs = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_kubevirt_node_selector is set but has no key=value entries: #{value.inspect}" if pairs.empty?
+
+      pairs.to_h do |pair|
         key, label = pair.split('=', 2).map(&:strip)
         raise ArgumentError, "BEAKER_kubevirt_node_selector entries must be key=value, got #{pair.inspect}" if label.nil? || key.empty?
 
@@ -645,7 +659,10 @@ module Beaker
     end
 
     def parse_tolerations(value)
-      value.split(',').map(&:strip).reject(&:empty?).map do |entry|
+      entries = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_kubevirt_tolerations is set but has no entries: #{value.inspect}" if entries.empty?
+
+      entries.map do |entry|
         taint, separator, effect = entry.rpartition(':')
         raise ArgumentError, "BEAKER_kubevirt_tolerations entries must be key=value:Effect or key:Effect, got #{entry.inspect}" if separator.empty?
 
@@ -657,14 +674,20 @@ module Beaker
     def build_toleration(entry)
       raise ArgumentError, "Each kubevirt_tolerations entry must be a hash, got #{entry.inspect}" unless entry.is_a?(Hash)
 
-      key, value, effect = %w[key value effect].map { |field| (entry[field] || entry[field.to_sym]).to_s.strip }
+      # key? rather than ||, so a YAML `value: false` is the string "false" and
+      # not a missing value, which would widen the toleration to Exists.
+      key, value, effect = %w[key value effect].map { |field| entry.key?(field) ? entry[field] : entry[field.to_sym] }
+      key = key.to_s.strip
+      effect = effect.to_s.strip
       raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
       raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless TOLERATION_EFFECTS.include?(effect)
 
-      if value.empty?
+      # Only an absent value means Exists. An explicit empty string is Equal "",
+      # which matches only taints whose value is empty.
+      if value.nil?
         { 'key' => key, 'operator' => 'Exists', 'effect' => effect }
       else
-        { 'key' => key, 'operator' => 'Equal', 'value' => value, 'effect' => effect }
+        { 'key' => key, 'operator' => 'Equal', 'value' => value.to_s.strip, 'effect' => effect }
       end
     end
 
