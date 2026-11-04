@@ -59,6 +59,8 @@ module Beaker
     DISK_CACHE_MODES = %w[none writethrough writeback].freeze
     # Taint effects a toleration may name
     TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
+    # Fields a kubevirt_tolerations entry may set
+    TOLERATION_FIELDS = %w[key value effect].freeze
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
     # virt-launcher container termination reasons we treat as fatal.
@@ -623,7 +625,9 @@ module Beaker
 
     def scalar?(value)
       case value
-      when String, Symbol, Numeric, true, false then true
+      # Not Float: YAML reads an unquoted 1.10 as 1.1, which would select the
+      # wrong nodes without an error. A quoted value is unambiguous.
+      when String, Symbol, Integer, true, false then true
       else false
       end
     end
@@ -673,6 +677,14 @@ module Beaker
 
     def build_toleration(entry)
       raise ArgumentError, "Each kubevirt_tolerations entry must be a hash, got #{entry.inspect}" unless entry.is_a?(Hash)
+
+      # operator and tolerationSeconds are not supported. Dropping them silently
+      # would change what the toleration matches or how long it lasts.
+      unknown = entry.keys.map(&:to_s) - TOLERATION_FIELDS
+      unless unknown.empty?
+        raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has unsupported fields #{unknown.join(', ')}; " \
+                             "only #{TOLERATION_FIELDS.join(', ')} are accepted (an entry without a value tolerates any value)"
+      end
 
       # key? rather than ||, so a YAML `value: false` is the string "false" and
       # not a missing value, which would widen the toleration to Exists.

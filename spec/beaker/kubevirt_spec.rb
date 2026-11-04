@@ -2237,6 +2237,15 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "pool" must be a single label value/)
     end
 
+    it 'raises ArgumentError for a float value, which YAML may have changed' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'k8s-version' => 1.1 } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "k8s-version" must be a single label value, got 1.1/)
+    end
+
+    it 'accepts an integer value' do
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => { 'gen' => 3 } })).to eq('gen' => '3')
+    end
+
     it 'raises ArgumentError for a nil value' do
       host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'pool' => nil } }
       expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "pool" must be a single label value/)
@@ -2280,6 +2289,17 @@ RSpec.describe Beaker::Kubevirt do
     it 'builds an Equal toleration for an explicit empty value' do
       host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'dedicated', 'value' => '', 'effect' => 'NoSchedule' }] }
       expect(hypervisor.send(:tolerations, host)).to eq([{ 'key' => 'dedicated', 'operator' => 'Equal', 'value' => '', 'effect' => 'NoSchedule' }])
+    end
+
+    [
+      { 'key' => 'dedicated', 'operator' => 'Equal', 'effect' => 'NoSchedule' },
+      { key: 'x', operator: 'Exists', value: 'v', effect: 'NoSchedule' },
+      { 'key' => 'x', 'effect' => 'NoExecute', 'tolerationSeconds' => 300 },
+    ].each do |entry|
+      it "raises ArgumentError for unsupported fields in #{entry.inspect}" do
+        expect { hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [entry] }) }
+          .to raise_error(ArgumentError, /has unsupported fields (operator|tolerationSeconds); only key, value, effect are accepted/)
+      end
     end
 
     it 'accepts symbol keys' do
