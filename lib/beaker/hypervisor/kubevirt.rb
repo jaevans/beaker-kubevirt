@@ -76,10 +76,20 @@ module Beaker
     # Pull failures kubelet's retry will never fix — a bad tag, a missing repo or
     # a rejected credential. Failing these immediately keeps a typo'd image as
     # fast to diagnose as it was before the grace window existed. Transport-level
-    # failures (EOF, connection reset, timeouts) deliberately do not match, and
-    # neither does a bare "not found": a cold pull-through cache answers 404 for
-    # a blob it has not fetched yet, which is exactly the case the window is for.
-    DEFINITIVE_IMAGE_PULL_FAILURE_RE = /manifest unknown|unauthorized|denied/i
+    # failures (EOF, connection reset, timeouts) deliberately do not match. The
+    # patterns are anchored to the registry's and containerd's own wording: a
+    # bare "not found" would catch a cold pull-through cache's blob 404, and a
+    # bare "denied" would catch `connect: permission denied` from a network flap,
+    # both of which are what the window is for. containerd reports a missing tag
+    # as `failed to resolve reference "<ref>": <ref>: not found`; resolving is
+    # the tag/manifest lookup, never a blob fetch.
+    DEFINITIVE_IMAGE_PULL_FAILURE_RE = Regexp.union(
+      /manifest unknown/i,
+      /failed to resolve reference .*: not found/i,
+      /pull access denied/i,
+      /requested access to the resource is denied/i,
+      /unauthorized: authentication required/i,
+    )
     # virt-launcher container termination reasons we treat as fatal.
     FATAL_CONTAINER_TERMINATED_REASONS = %w[OOMKilled Error ContainerCannotRun].freeze
     # PodScheduled=False reasons that mean the scheduler cannot place the virt-launcher pod.
@@ -134,7 +144,8 @@ module Beaker
     #   stay in ImagePullBackOff/ErrImagePull before it is treated as fatal (default: 600s).
     #   kubelet retries image pulls, so a cold pull-through cache or a slow registry clears on
     #   its own. Bounded by (and does not extend) the effective :timeout above, and skipped
-    #   entirely when the pull failure is definitive (unknown manifest, unauthorized, denied).
+    #   entirely when the pull failure is definitive (an unknown manifest or tag, or the
+    #   registry refusing access).
     #   Set it to 0 to switch the window off and fail on the first backoff, as this check
     #   did before the option existed.
     # @option options [Integer] :kubevirt_unschedulable_grace How long the virt-launcher pod may

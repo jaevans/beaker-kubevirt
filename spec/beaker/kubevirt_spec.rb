@@ -950,6 +950,38 @@ RSpec.describe Beaker::Kubevirt do
         expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/manifest unknown/)
       end
 
+      it "raises immediately on containerd's error for a tag that does not exist" do
+        missing_tag = 'failed to pull and unpack image "registry.example.com/foo:typo": failed to resolve reference ' \
+                      '"registry.example.com/foo:typo": registry.example.com/foo:typo: not found'
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', missing_tag), nil)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/is ErrImagePull: .*foo:typo: not found/)
+      end
+
+      [
+        'pull access denied for registry.example.com/foo, repository does not exist or may require authorization',
+        'denied: requested access to the resource is denied',
+      ].each do |message|
+        it "raises immediately on #{message.inspect}" do
+          allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
+          allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', message), nil)
+          expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/is ErrImagePull: #{Regexp.escape(message)}/)
+        end
+      end
+
+      {
+        'a network permission denied' =>
+          'failed to do request: Head "https://registry.example.com/v2/foo/manifests/latest": dial tcp 10.0.0.1:443: connect: permission denied',
+        'a node filesystem permission denied' =>
+          'failed to extract layer: open /var/lib/containerd/io.containerd.content.v1.content/ingest/abc/data: permission denied',
+      }.each do |description, message|
+        it "gives #{description} the grace window" do
+          allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+          allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', message), nil)
+          expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+        end
+      end
+
       it 'raises immediately when the registry denies the pull' do
         allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
         allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(
