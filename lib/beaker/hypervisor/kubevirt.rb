@@ -76,8 +76,10 @@ module Beaker
     # Pull failures kubelet's retry will never fix — a bad tag, a missing repo or
     # a rejected credential. Failing these immediately keeps a typo'd image as
     # fast to diagnose as it was before the grace window existed. Transport-level
-    # failures (EOF, connection reset, timeouts) deliberately do not match.
-    DEFINITIVE_IMAGE_PULL_FAILURE_RE = /manifest unknown|not found|unauthorized|denied/i
+    # failures (EOF, connection reset, timeouts) deliberately do not match, and
+    # neither does a bare "not found": a cold pull-through cache answers 404 for
+    # a blob it has not fetched yet, which is exactly the case the window is for.
+    DEFINITIVE_IMAGE_PULL_FAILURE_RE = /manifest unknown|unauthorized|denied/i
     # virt-launcher container termination reasons we treat as fatal.
     FATAL_CONTAINER_TERMINATED_REASONS = %w[OOMKilled Error ContainerCannotRun].freeze
     # PodScheduled=False reasons that mean the scheduler cannot place the virt-launcher pod.
@@ -160,8 +162,8 @@ module Beaker
       @test_group_identifier = configured_test_group_identifier || "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
-      # "<vm_name>/<container>" => monotonic timestamp the container was first
-      # seen backing off an image pull. Cleared when it leaves that state.
+      # "<pod_name>/<container>" => monotonic timestamp the container was first
+      # seen backing off an image pull. Cleared once it is running or terminated.
       @image_pull_backoff_since = {}
       # vm_name => { uid:, since: } — the virt-launcher pod's UID and the monotonic
       # timestamp it was first seen unschedulable. Cleared as soon as the scheduler
@@ -1139,7 +1141,9 @@ module Beaker
         if IMAGE_PULL_WAITING_REASONS.include?(waiting_reason)
           check_image_pull_backoff!(host, pod_name, name, waiting_reason, cs.dig('state', 'waiting', 'message').to_s)
         else
-          @image_pull_backoff_since.delete("#{pod_name}/#{name}")
+          # Only a container that has got past the pull ends its window. A
+          # transient other waiting state between two backoffs must not restart it.
+          @image_pull_backoff_since.delete("#{pod_name}/#{name}") if cs.dig('state', 'running') || cs.dig('state', 'terminated')
 
           if FATAL_CONTAINER_WAITING_REASONS.include?(waiting_reason)
             raise "virt-launcher container #{name} for #{vm_name} is #{waiting_reason}: " \
@@ -1213,7 +1217,7 @@ module Beaker
       return DEFAULT_IMAGE_PULL_GRACE if value.nil?
 
       grace = Integer(value, exception: false)
-      raise ArgumentError, "kubevirt_image_pull_grace must be a whole number of seconds, got #{value.inspect}" if grace.nil?
+      raise ArgumentError, "kubevirt_image_pull_grace must be a whole number of seconds, got #{value.inspect}" if grace.nil? || grace.negative?
 
       grace
     end

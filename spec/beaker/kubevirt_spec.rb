@@ -849,11 +849,35 @@ RSpec.describe Beaker::Kubevirt do
       end
 
       it 'stays within the default grace window just short of 600 seconds' do
-        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, pending_vmi, running_vmi)
         allow(kubevirt_helper).to receive(:get_virt_launcher_pod)
-          .and_return(waiting_pod('ImagePullBackOff'), nil)
-        allow(hypervisor).to receive(:monotonic_time).and_return(0, 599)
+          .and_return(waiting_pod('ImagePullBackOff'), waiting_pod('ImagePullBackOff'), nil)
+        expect(hypervisor).to receive(:monotonic_time).twice.and_return(0, 599)
         expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'gives a cold cache blob 404 the grace window' do
+        missing_blob = 'failed to copy: httpReadSeeker: failed open: content at ' \
+                       'https://127.0.0.1:31000/v2/windows-2016/blobs/sha256:abc not found'
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', missing_blob), nil)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+
+      it 'keeps the window through another waiting state between backoffs' do
+        pods = [waiting_pod('ImagePullBackOff'), waiting_pod('PodInitializing', ''), waiting_pod('ImagePullBackOff')]
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi)
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod) do
+          pods.shift || raise('grace window restarted instead of expiring')
+        end
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 601)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/after 601s/)
+      end
+
+      it 'rejects a negative grace' do
+        host['kubevirt_image_pull_grace'] = -1
+        allow(kubevirt_helper).to receive_messages(get_vmi: pending_vmi, get_virt_launcher_pod: waiting_pod('ImagePullBackOff'))
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(ArgumentError, /got -1/)
       end
 
       it 'honors :kubevirt_image_pull_grace from the global options' do
