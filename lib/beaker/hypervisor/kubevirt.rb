@@ -510,11 +510,15 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
     def disk_cache(host)
-      cache = env_option('kubevirt_disk_cache') || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
-      return nil if cache.nil? || cache.to_s.empty?
+      env = env_option('kubevirt_disk_cache')
+      value = env || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      return nil if value.nil? || value.to_s.empty?
 
-      cache = cache.to_s
-      raise ArgumentError, "kubevirt_disk_cache must be one of #{DISK_CACHE_MODES.join(', ')}, got #{cache.inspect}" unless DISK_CACHE_MODES.include?(cache)
+      cache = value.to_s.downcase
+      unless DISK_CACHE_MODES.include?(cache)
+        source = env ? 'BEAKER_kubevirt_disk_cache' : 'kubevirt_disk_cache'
+        raise ArgumentError, "#{source} must be one of #{DISK_CACHE_MODES.join(', ')}, got #{value.to_s.inspect}"
+      end
 
       cache
     end
