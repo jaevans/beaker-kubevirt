@@ -585,10 +585,21 @@ RSpec.describe Beaker::Kubevirt do
         expect(options[:logger]).to have_received(:warn).with(/is Unschedulable, allowing 3600s.*Insufficient cpu/)
       end
 
-      it 'does not raise while still inside the grace window' do
-        host['kubevirt_unschedulable_grace'] = 3600
-        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(unschedulable_pod)
+      it 'does not raise just inside the grace window' do
+        stub_monotonic_clock
+        host['kubevirt_unschedulable_grace'] = 300
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_invoke(
+          lambda { |_|
+            clock[0] = 0
+            unschedulable_pod
+          },
+          lambda { |_|
+            clock[0] = 299.6
+            unschedulable_pod
+          },
+        )
         allow(kubevirt_helper).to receive(:get_vmi).and_return(
+          { 'status' => { 'phase' => 'Scheduling' } },
           { 'status' => { 'phase' => 'Scheduling' } },
           { 'status' => { 'phase' => 'Running', 'conditions' => [ready_true] } },
         )
@@ -619,20 +630,42 @@ RSpec.describe Beaker::Kubevirt do
       end
 
       it 'forgets the timer once the pod is scheduled, so a later blip gets a fresh window' do
-        host['kubevirt_unschedulable_grace'] = 0
-        scheduled = { 'status' => { 'phase' => 'Pending',
-                                    'conditions' => [{ 'type' => 'PodScheduled', 'status' => 'True' }], } }
-        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(unschedulable_pod, scheduled)
+        stub_monotonic_clock
+        host['kubevirt_unschedulable_grace'] = 300
+        scheduled = { 'metadata' => { 'uid' => 'pod-uid-1' },
+                      'status' => { 'phase' => 'Pending',
+                                    'conditions' => [{ 'type' => 'PodScheduled', 'status' => 'True' }], }, }
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_invoke(
+          lambda { |_|
+            clock[0] = 0
+            unschedulable_pod
+          },
+          lambda { |_|
+            clock[0] = 200
+            scheduled
+          },
+          lambda { |_|
+            clock[0] = 400
+            unschedulable_pod
+          },
+        )
         allow(kubevirt_helper).to receive(:get_vmi).and_return(
+          { 'status' => { 'phase' => 'Scheduling' } },
           { 'status' => { 'phase' => 'Scheduling' } },
           { 'status' => { 'phase' => 'Scheduling' } },
           { 'status' => { 'phase' => 'Running', 'conditions' => [ready_true] } },
         )
-        # First poll raises only if the window has expired; with grace 0 it would.
-        # Assert the *timer* is cleared by checking the hash directly after a scheduled poll.
-        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/still Unschedulable/)
-        hypervisor.send(:check_pod_schedulable!, host, 'test-vm', scheduled)
-        expect(hypervisor.instance_variable_get(:@unschedulable_since)).not_to have_key('test-vm')
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+        expect(options[:logger]).to have_received(:warn).with(/is Unschedulable, allowing 300s/).twice
+      end
+
+      it 'rejects a grace that is not a whole, non-negative number of seconds' do
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(unschedulable_pod)
+        %w[5m five -1].each do |value|
+          host['kubevirt_unschedulable_grace'] = value
+          expect { hypervisor.send(:wait_for_vm_ready, host) }
+            .to raise_error(ArgumentError, /kubevirt_unschedulable_grace must be a whole number of seconds, got #{Regexp.escape(value.inspect)}/)
+        end
       end
 
       it 'waits through a nonzero window and raises once it has elapsed' do

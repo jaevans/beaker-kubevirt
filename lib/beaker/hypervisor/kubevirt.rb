@@ -965,10 +965,10 @@ module Beaker
                      "for capacity: #{message}")
       end
 
-      waited = (monotonic_time - tracked[:since]).round
+      waited = monotonic_time - tracked[:since]
       return if waited < grace
 
-      raise "virt-launcher pod for #{vm_name} is still #{reason} after #{waited}s: #{message}"
+      raise "virt-launcher pod for #{vm_name} is still #{reason} after #{waited.round}s: #{message}"
     end
 
     ##
@@ -977,7 +977,12 @@ module Beaker
     # @return [Integer]
     def unschedulable_grace(host)
       value = host['kubevirt_unschedulable_grace'] || @options[:kubevirt_unschedulable_grace]
-      value.nil? ? DEFAULT_UNSCHEDULABLE_GRACE : value.to_i
+      return DEFAULT_UNSCHEDULABLE_GRACE if value.nil?
+
+      grace = Integer(value, exception: false)
+      raise ArgumentError, "kubevirt_unschedulable_grace must be a whole number of seconds, got #{value.inspect}" if grace.nil? || grace.negative?
+
+      grace
     end
 
     ##
