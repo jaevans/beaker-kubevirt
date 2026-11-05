@@ -84,6 +84,7 @@ CONFIG:
 | `kubevirt_memory_overhead` | Extra memory added to the guest for the virt-launcher container memory limit. Raise this for Windows guests that OOMKill with the default. | No | `512Mi` | HOSTS (per-host), CONFIG |
 | `kubevirt_memory_request` | Memory request for the VM pod. | No | Same as `kubevirt_memory` | HOSTS (per-host), CONFIG |
 | `kubevirt_disk_size` | Size of the root disk | No | `10Gi` | HOSTS (per-host) |
+| `kubevirt_storage_class` | Storage class for the root disk's DataVolume, used when `kubevirt_vm_image` is an `http(s)://` URL or a PVC to clone. Unset uses the cluster's default storage class. A `docker://`/`oci://` containerDisk has no DataVolume and ignores it. Cloning a PVC into a different class may make CDI copy the data instead of using a CSI clone. A non-empty `BEAKER_kubevirt_storage_class` environment variable overrides the host and CONFIG values. | No | cluster default | `BEAKER_kubevirt_storage_class`, HOSTS (per-host), CONFIG |
 | `kubevirt_cloud_init` | Custom cloud-init YAML | No | Auto-generated | HOSTS (per-host) |
 | `kubevirt_vm_ssh_port` | SSH port inside the VM | No | `22` | HOSTS (per-host) |
 | `kubevirt_readiness_probe_disabled` | Skip the VMI SSH readinessProbe. Default is `false` for pod-network modes and `true` for `multus` (where a probe from the virt-launcher netns typically can't reach a bridge-only guest). | No | mode-dependent | HOSTS (per-host), CONFIG |

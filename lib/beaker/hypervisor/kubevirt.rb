@@ -873,6 +873,18 @@ module Beaker
     end
 
     ##
+    # Storage class for the root disk's DataVolume, from
+    # BEAKER_kubevirt_storage_class, the host or the global CONFIG, in that
+    # order. Unset leaves the choice to the cluster's default class. A
+    # containerDisk root has no DataVolume, so it is unaffected.
+    # @param [Host] host The host configuration
+    # @return [String, nil] The storage class name, or nil when unset
+    def storage_class(host)
+      name = (env_option('kubevirt_storage_class') || host['kubevirt_storage_class'] || @options[:kubevirt_storage_class]).to_s.strip
+      name unless name.empty?
+    end
+
+    ##
     # Generate a DataVolume Template for the root disk
     # @param [String] vm_image The VM image specification
     # @param [Host] host The host configuration
@@ -894,6 +906,9 @@ module Beaker
           },
         },
       }
+
+      storage_class_name = storage_class(host)
+      dv_spec['spec']['storage']['storageClassName'] = storage_class_name if storage_class_name
 
       # If a custom service account is specified, add it to the DataVolume spec
       # so it can access the source PVC when required (including cross-namespace clones)
