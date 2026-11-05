@@ -109,7 +109,7 @@ Notes:
 
 #### Environment overrides
 
-An option whose Location lists a `BEAKER_kubevirt_*` variable can be set from the environment, so a CI job can apply it to every nodeset it runs. The upper-case spelling (`BEAKER_KUBEVIRT_DISK_CACHE`) works too; setting both spellings to different values is an error. A non-empty variable wins over the host and CONFIG values (environment, then host, then CONFIG), and a warning naming the host is logged when it overrides a value the host set itself. A blank variable is ignored. `default`, in any case, unsets the option whatever the host and CONFIG say, leaving the choice to KubeVirt or the cluster.
+An option whose Location lists a `BEAKER_kubevirt_*` variable can be set from the environment, so a CI job can apply it to every nodeset it runs. The upper-case spelling (`BEAKER_KUBEVIRT_DISK_CACHE`) works too; setting both spellings to different values is an error. A non-empty variable wins over the host and CONFIG values (environment, then host, then CONFIG), and a warning naming the host is logged when it overrides a value the host set itself. A blank variable is ignored. `default`, in any case, unsets the option whatever the host and CONFIG say, leaving the choice to KubeVirt or the cluster. A key given twice, whether in a variable (`pool=ci,pool=gpu`) or as a symbol and a string in a hash, is an error rather than the last one silently winning.
 
 ### VM Image Formats
 
