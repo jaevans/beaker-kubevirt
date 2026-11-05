@@ -96,6 +96,12 @@ RSpec.describe Beaker::Kubevirt do
       it 'uses the supplied identifier' do
         expect(identifier_for).to eq('beaker-ci-12345')
       end
+
+      it 'does not warn when the value is already a DNS label' do
+        identifier_for
+
+        expect(options[:logger]).not_to have_received(:warn)
+      end
     end
 
     context 'when BEAKER_KUBEVIRT_TEST_GROUP is longer than 63 characters' do
@@ -104,6 +110,29 @@ RSpec.describe Beaker::Kubevirt do
       it 'raises instead of truncating it' do
         expect { described_class.new(hosts, options) }
           .to raise_error(ArgumentError, /BEAKER_KUBEVIRT_TEST_GROUP must be at most 63 characters, got #{env_value.length}/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP has uppercase letters and underscores' do
+      let(:env_value) { 'CI_1' }
+
+      it 'normalises it to the same identifier as its DNS-label form' do
+        expect(identifier_for).to eq('ci-1')
+      end
+
+      it 'uses that one value for the label and the resource names' do
+        host = { 'name' => 'test-host' }
+
+        expect(hypervisor.send(:get_labels, host)['beaker/test-group']).to eq('ci-1')
+        expect(hypervisor.send(:generate_vm_name, host)).to eq('ci-1-test-host')
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP starts with a digit' do
+      let(:env_value) { '12345' }
+
+      it 'prefixes a letter so it is a valid DNS label' do
+        expect(identifier_for).to eq('x12345')
       end
     end
 
@@ -121,7 +150,7 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'strips it and warns that the identifier was changed' do
         expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-123')
-        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
+        expect(logger).to have_received(:warn).with(/not a valid DNS label/)
       end
     end
 
@@ -136,7 +165,7 @@ RSpec.describe Beaker::Kubevirt do
       it 'warns that the identifier was changed' do
         identifier_for(options.merge(logger: logger))
 
-        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
+        expect(logger).to have_received(:warn).with(/not a valid DNS label/)
       end
     end
 
