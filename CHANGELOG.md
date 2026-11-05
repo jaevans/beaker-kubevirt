@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0](https://github.com/voxpupuli/beaker-kubevirt/tree/1.0.0) (2026-11-05)
+
+[Full Changelog](https://github.com/voxpupuli/beaker-kubevirt/compare/1.0.0...1.0.0)
+
+**Closed issues:**
+
+- Allow the test-group identifier to be supplied via the environment [\#63](https://github.com/voxpupuli/beaker-kubevirt/issues/63)
+- ImagePullBackOff treated as fatal aborts provisioning that would otherwise succeed [\#54](https://github.com/voxpupuli/beaker-kubevirt/issues/54)
+
+**Merged pull requests:**
+
+- Update voxpupuli-rubocop to ~\> 5.3.0 and fix new offenses [\#86](https://github.com/voxpupuli/beaker-kubevirt/pull/86) ([silug](https://github.com/silug))
+- Add kubevirt\_labels and kubevirt\_annotations [\#85](https://github.com/voxpupuli/beaker-kubevirt/pull/85) ([jaevans](https://github.com/jaevans))
+- Add kubevirt\_storage\_class for the root disk [\#84](https://github.com/voxpupuli/beaker-kubevirt/pull/84) ([jaevans](https://github.com/jaevans))
+- Add kubevirt\_node\_selector and kubevirt\_tolerations [\#83](https://github.com/voxpupuli/beaker-kubevirt/pull/83) ([jaevans](https://github.com/jaevans))
+- Honour BEAKER\_kubevirt\_disk\_cache [\#82](https://github.com/voxpupuli/beaker-kubevirt/pull/82) ([jaevans](https://github.com/jaevans))
+- Add kubevirt\_disk\_cache option for the root disk cache mode [\#77](https://github.com/voxpupuli/beaker-kubevirt/pull/77) ([silug](https://github.com/silug))
+- Update voxpupuli-rubocop requirement from ~\> 5.2.0 to ~\> 5.3.0 [\#72](https://github.com/voxpupuli/beaker-kubevirt/pull/72) ([dependabot[bot]](https://github.com/apps/dependabot))
+- Add kubevirt\_cpu\_request and kubevirt\_cpu\_limit [\#66](https://github.com/voxpupuli/beaker-kubevirt/pull/66) ([jaevans](https://github.com/jaevans))
+- Detect an unschedulable virt-launcher pod instead of waiting out the timeout [\#65](https://github.com/voxpupuli/beaker-kubevirt/pull/65) ([jaevans](https://github.com/jaevans))
+- feat: allow the test-group identifier to be supplied via the environment [\#64](https://github.com/voxpupuli/beaker-kubevirt/pull/64) ([jaevans](https://github.com/jaevans))
+- Remove CodeQL workflow in favor of default setup [\#62](https://github.com/voxpupuli/beaker-kubevirt/pull/62) ([silug](https://github.com/silug))
+- Give image pull backoff a grace window before failing [\#55](https://github.com/voxpupuli/beaker-kubevirt/pull/55) ([jaevans](https://github.com/jaevans))
+
 ## [1.0.0](https://github.com/voxpupuli/beaker-kubevirt/tree/1.0.0) (2026-07-17)
 
 [Full Changelog](https://github.com/voxpupuli/beaker-kubevirt/compare/a388e545ac4aa46006e53f006ad5af1a243bdbbd...1.0.0)
