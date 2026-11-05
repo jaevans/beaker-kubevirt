@@ -621,18 +621,25 @@ module Beaker
     end
 
     ##
-    # A hash option that BEAKER_<name> may replace with a comma-separated list
-    # of key=value pairs. Only the first = in a pair separates key from value.
+    # A hash option whose host value is merged over its CONFIG value, the
+    # host winning per key, so a host's own entries keep global ones such as
+    # a cost-centre label. BEAKER_<name>, a comma-separated list of key=value
+    # pairs, replaces both. Only the first = in a pair separates key from
+    # value.
     # @param [Host] host The host configuration
     # @param [String] name The option name
     # @return [Hash{String=>String}] The option, empty when unset
     def key_value_option(host, name)
-      value, variable = layered_option(host, name)
-      value = parse_key_values(variable, value) if variable
-      return {} if value.nil?
-      raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
+      value, variable = layered_option(host, name) do |host_value, config_value|
+        [config_value, host_value].compact.reduce({}) do |merged, hash|
+          raise ArgumentError, "#{name} must be a hash of keys to values, got #{hash.inspect}" unless hash.is_a?(Hash)
 
-      string_keys(name, value).to_h do |key, val|
+          merged.merge(string_keys(name, hash))
+        end
+      end
+      return {} if value.nil?
+
+      (variable ? parse_key_values(variable, value) : value).to_h do |key, val|
         unless qualified_key?(key)
           raise ArgumentError, "#{name} key #{key.inspect} is not a valid Kubernetes key: expected an optional DNS subdomain " \
                                "prefix and '/', then a name of at most #{LABEL_VALUE_MAX} characters of letters, digits, " \
