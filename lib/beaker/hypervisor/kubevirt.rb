@@ -61,6 +61,13 @@ module Beaker
     TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
     # Fields a kubevirt_tolerations entry may set
     TOLERATION_FIELDS = %w[key value effect].freeze
+    # Labels beaker sets itself; cleanup and the NodePort service select on them
+    RESERVED_LABEL_KEYS = %w[beaker/test-group beaker/host kubevirt.io/vm].freeze
+    # Kubernetes label values, and the name part of label and annotation keys
+    LABEL_NAME_RE = /\A(?:[A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]\z/
+    # The optional prefix of a label or annotation key (an RFC 1123 subdomain)
+    KEY_PREFIX_RE = /\A[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*\z/
+    KEY_PREFIX_MAX = 253
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff].freeze
     # virt-launcher container waiting reasons that mean an image pull is being
@@ -567,10 +574,93 @@ module Beaker
 
     def get_labels(host)
       raw_name = host.respond_to?(:name) ? host.name : host['name']
-      {
+      user_labels(host).merge(
         'beaker/test-group' => @test_group_identifier,
         'beaker/host' => sanitize_k8s_label_value(raw_name),
-      }
+      )
+    end
+
+    ##
+    # Extra labels for every resource that carries beaker's own labels, from
+    # BEAKER_kubevirt_labels, the host or the global CONFIG, in that order.
+    # Cleanup finds resources by beaker/test-group, so the keys beaker sets
+    # itself are refused rather than silently overridden.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}] The labels, empty when unset
+    def user_labels(host)
+      labels = key_value_option(host, 'kubevirt_labels')
+      reserved = labels.keys & RESERVED_LABEL_KEYS
+      raise ArgumentError, "kubevirt_labels may not set #{reserved.join(', ')}; beaker sets those itself" unless reserved.empty?
+
+      labels.each do |key, value|
+        next if value.empty? || (value.length <= LABEL_VALUE_MAX && LABEL_NAME_RE.match?(value))
+
+        raise ArgumentError, "kubevirt_labels value for #{key.inspect} must be at most #{LABEL_VALUE_MAX} characters of " \
+                             "letters, digits, '-', '_' or '.', starting and ending with a letter or digit, got #{value.inspect}"
+      end
+      labels
+    end
+
+    ##
+    # Extra annotations for the VM template, and so for the VMI and its
+    # virt-launcher pod, from BEAKER_kubevirt_annotations, the host or the
+    # global CONFIG, in that order.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}, nil] The annotations, or nil when unset
+    def user_annotations(host)
+      annotations = key_value_option(host, 'kubevirt_annotations')
+      annotations unless annotations.empty?
+    end
+
+    ##
+    # A hash option that BEAKER_<name> may replace with a comma-separated list
+    # of key=value pairs. Only the first = in a pair separates key from value.
+    # @param [Host] host The host configuration
+    # @param [String] name The option name
+    # @return [Hash{String=>String}] The option, empty when unset
+    def key_value_option(host, name)
+      env = env_option(name)
+      value = env ? parse_key_values(name, env) : host[name] || @options[name.to_sym]
+      return {} if value.nil?
+      raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
+
+      value.to_h do |key, val|
+        key = key.to_s
+        unless qualified_key?(key)
+          raise ArgumentError, "#{name} key #{key.inspect} is not a valid Kubernetes key: expected an optional DNS subdomain " \
+                               "prefix and '/', then a name of at most #{LABEL_VALUE_MAX} characters of letters, digits, " \
+                               "'-', '_' or '.', starting and ending with a letter or digit"
+        end
+
+        raise ArgumentError, "#{name} value for #{key.inspect} must be a single value, got #{val.inspect}" if val.is_a?(Hash) || val.is_a?(Array)
+
+        [key, val.to_s]
+      end
+    end
+
+    ##
+    # Whether a string is a valid label or annotation key: an optional
+    # DNS-subdomain prefix and '/', then a name. The API server rejects
+    # anything else with a 422, deep into provisioning.
+    # @param [String] key
+    # @return [Boolean]
+    def qualified_key?(key)
+      prefix, slash, name = key.rpartition('/')
+      return false unless name.length <= LABEL_VALUE_MAX && LABEL_NAME_RE.match?(name)
+
+      slash.empty? || (prefix.length <= KEY_PREFIX_MAX && KEY_PREFIX_RE.match?(prefix))
+    end
+
+    def parse_key_values(name, value)
+      pairs = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_#{name} is set but has no key=value entries: #{value.inspect}" if pairs.empty?
+
+      pairs.to_h do |pair|
+        key, val = pair.split('=', 2).map(&:strip)
+        raise ArgumentError, "BEAKER_#{name} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
+
+        [key, val]
+      end
     end
 
     ##
@@ -649,7 +739,7 @@ module Beaker
     # @return [Hash{String=>String}, nil] The selector, or nil when unset
     def node_selector(host)
       env = env_option('kubevirt_node_selector')
-      selector = env ? parse_node_selector(env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
+      selector = env ? parse_key_values('kubevirt_node_selector', env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
       return nil if selector.nil?
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
       return nil if selector.empty?
@@ -667,18 +757,6 @@ module Beaker
       # wrong nodes without an error. A quoted value is unambiguous.
       when String, Symbol, Integer, true, false then true
       else false
-      end
-    end
-
-    def parse_node_selector(value)
-      pairs = value.split(',').map(&:strip).reject(&:empty?)
-      raise ArgumentError, "BEAKER_kubevirt_node_selector is set but has no key=value entries: #{value.inspect}" if pairs.empty?
-
-      pairs.to_h do |pair|
-        key, label = pair.split('=', 2).map(&:strip)
-        raise ArgumentError, "BEAKER_kubevirt_node_selector entries must be key=value, got #{pair.inspect}" if label.nil? || key.empty?
-
-        [key, label]
       end
     end
 
@@ -832,7 +910,8 @@ module Beaker
               'labels' => get_labels(host).merge({
                                                    'kubevirt.io/vm' => vm_name,
                                                  }),
-            },
+              'annotations' => user_annotations(host),
+            }.compact,
             'spec' => {
               'domain' => {
                 'cpu' => {

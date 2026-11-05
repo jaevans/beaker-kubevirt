@@ -2243,7 +2243,7 @@ RSpec.describe Beaker::Kubevirt do
     end
 
     it 'uses host name from name method when available' do
-      host_obj = double(name: 'object-host')
+      host_obj = double(name: 'object-host', '[]': nil)
       result = hypervisor.send(:get_labels, host_obj)
       expect(result['beaker/host']).to eq('object-host')
     end
@@ -2251,6 +2251,100 @@ RSpec.describe Beaker::Kubevirt do
     it 'returns hash with exactly 2 labels' do
       result = hypervisor.send(:get_labels, host)
       expect(result.size).to eq(2)
+    end
+
+    context 'with kubevirt_labels' do
+      it 'adds host labels alongside beaker labels' do
+        result = hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'infra' }))
+        expect(result).to include('team' => 'infra', 'beaker/host' => 'test-host')
+      end
+
+      it 'falls back to the CONFIG value' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'team' => 'infra' }))
+        expect(hypervisor.send(:get_labels, host)).to include('team' => 'infra')
+      end
+
+      it 'prefers the host value over CONFIG' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'team' => 'config' }))
+        expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'host' }))).to include('team' => 'host')
+      end
+
+      it 'stringifies symbol keys and non-string values' do
+        expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { ci: true }))).to include('ci' => 'true')
+      end
+
+      it 'lets BEAKER_kubevirt_labels replace the host value' do
+        ENV['BEAKER_kubevirt_labels'] = 'team=env, site = west'
+        result = hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'other' => 'x' }))
+        expect(result).to include('team' => 'env', 'site' => 'west')
+        expect(result).not_to have_key('other')
+      end
+
+      it 'raises ArgumentError for a BEAKER_kubevirt_labels entry without =' do
+        ENV['BEAKER_kubevirt_labels'] = 'team'
+        expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_labels entries must be key=value/)
+      end
+
+      it 'raises ArgumentError when not a hash' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => ['team=infra'])) }.to raise_error(ArgumentError, /must be a hash/)
+      end
+
+      it 'raises ArgumentError for a scalar' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => 5)) }
+          .to raise_error(ArgumentError, /kubevirt_labels must be a hash of keys to values, got 5/)
+      end
+
+      it 'accepts prefixed keys and empty values' do
+        labels = { 'example.com/team' => 'infra', 'empty' => '', 'a' * 63 => 'b' * 63 }
+        expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => labels))).to include(labels)
+      end
+
+      [
+        ['contains a space', 'QA team'],
+        ['is longer than 63 characters', 'a' * 64],
+        ['ends with a hyphen', 'infra-'],
+      ].each do |description, value|
+        it "raises ArgumentError naming the label when a value #{description}" do
+          expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => value })) }
+            .to raise_error(ArgumentError, /kubevirt_labels value for "team" must be at most 63 characters.*got #{Regexp.escape(value.inspect)}/)
+        end
+      end
+
+      [
+        ['has a space', 'my team'],
+        ['has an empty name', 'example.com/'],
+        ['has an invalid prefix', 'Example_Com/team'],
+        ['has two slashes', 'a/b/c'],
+        ['has a name longer than 63 characters', 'a' * 64],
+      ].each do |description, key|
+        it "raises ArgumentError naming the key when it #{description}" do
+          expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { key => 'x' })) }
+            .to raise_error(ArgumentError, /kubevirt_labels key #{Regexp.escape(key.inspect)} is not a valid Kubernetes key/)
+        end
+      end
+
+      it 'validates BEAKER_kubevirt_labels values' do
+        ENV['BEAKER_kubevirt_labels'] = 'team=QA team'
+        expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, /value for "team"/)
+      end
+
+      %w[beaker/test-group beaker/host kubevirt.io/vm].each do |key|
+        it "refuses to set #{key}" do
+          expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { key => 'mine' })) }
+            .to raise_error(ArgumentError, /kubevirt_labels may not set #{Regexp.escape(key)}/)
+        end
+      end
+
+      it 'raises ArgumentError for a nested value' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => { 'a' => 1 } })) }
+          .to raise_error(ArgumentError, /kubevirt_labels value for "team" must be a single value/)
+      end
+
+      it 'raises ArgumentError when BEAKER_kubevirt_labels has no entries' do
+        ENV['BEAKER_kubevirt_labels'] = ' , '
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'infra' })) }
+          .to raise_error(ArgumentError, /BEAKER_kubevirt_labels is set but has no key=value entries/)
+      end
     end
 
     context 'when test group is consistent' do
@@ -2261,6 +2355,83 @@ RSpec.describe Beaker::Kubevirt do
         labels2 = hypervisor.send(:get_labels, host2)
         expect(labels1['beaker/test-group']).to eq(labels2['beaker/test-group'])
       end
+    end
+  end
+
+  describe '#user_annotations' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+    let(:evict) { { 'cluster-autoscaler.kubernetes.io/safe-to-evict' => 'false' } }
+
+    it 'returns nil when not set' do
+      expect(hypervisor.send(:user_annotations, { 'name' => 'test-host' })).to be_nil
+    end
+
+    it 'returns the host value' do
+      expect(hypervisor.send(:user_annotations, { 'name' => 'test-host', 'kubevirt_annotations' => evict })).to eq(evict)
+    end
+
+    it 'allows any annotation value' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note' => 'QA team, see #42' } }
+      expect(hypervisor.send(:user_annotations, host)).to eq('example.com/note' => 'QA team, see #42')
+    end
+
+    it 'raises ArgumentError for a nested value' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/cfg' => { 'a' => 1 } } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations value for "example.com.cfg" must be a single value/)
+    end
+
+    it 'raises ArgumentError for an invalid annotation key' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'my note' => 'x' } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations key "my note"/)
+    end
+
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:user_annotations, { 'name' => 'test-host', 'kubevirt_annotations' => 'x' }) }
+        .to raise_error(ArgumentError, /must be a hash/)
+    end
+
+    it 'falls back to the CONFIG value' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_annotations: evict))
+      expect(hypervisor.send(:user_annotations, { 'name' => 'test-host' })).to eq(evict)
+    end
+
+    it 'lets BEAKER_kubevirt_annotations replace the host value, keeping = in values' do
+      ENV['BEAKER_kubevirt_annotations'] = 'cluster-autoscaler.kubernetes.io/safe-to-evict=false,example.com/query=a=b'
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'other' => 'x' } }
+      expect(hypervisor.send(:user_annotations, host)).to eq(evict.merge('example.com/query' => 'a=b'))
+    end
+  end
+
+  describe '#generate_vm_spec labels and annotations' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+    let(:host) do
+      {
+        'name' => 'test-host',
+        'kubevirt_labels' => { 'team' => 'infra' },
+        'kubevirt_annotations' => { 'cluster-autoscaler.kubernetes.io/safe-to-evict' => 'false' },
+      }
+    end
+    let(:vm_spec) { hypervisor.send(:generate_vm_spec, host, 'test-vm', 'cloud-init-secret') }
+
+    it 'labels the VM and its template' do
+      expect(vm_spec.dig('metadata', 'labels')).to include('team' => 'infra')
+      expect(vm_spec.dig('spec', 'template', 'metadata', 'labels')).to include('team' => 'infra', 'kubevirt.io/vm' => 'test-vm')
+    end
+
+    it 'annotates only the VM template' do
+      expect(vm_spec.dig('spec', 'template', 'metadata', 'annotations')).to eq('cluster-autoscaler.kubernetes.io/safe-to-evict' => 'false')
+      expect(vm_spec['metadata']).not_to have_key('annotations')
+    end
+
+    it 'omits template annotations when unset' do
+      spec = hypervisor.send(:generate_vm_spec, { 'name' => 'test-host' }, 'test-vm', 'cloud-init-secret')
+      expect(spec.dig('spec', 'template', 'metadata')).not_to have_key('annotations')
+    end
+
+    it 'labels the root DataVolume' do
+      dv = hypervisor.send(:generate_root_volume_dvtemplate, 'https://example.com/disk.qcow2', host.merge('dv_name' => 'test-vm-disk'))[0]
+      expect(dv.dig('metadata', 'labels')).to include('team' => 'infra')
+      expect(dv['metadata']).not_to have_key('annotations')
     end
   end
 
