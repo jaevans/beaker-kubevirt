@@ -195,6 +195,9 @@ module Beaker
       # timestamp it was first seen unschedulable. Cleared as soon as the scheduler
       # places it; restarted when a pod with a different UID replaces it.
       @unschedulable_since = {}
+      # Keyed by identity: a host's contents change as provisioning stores
+      # vm_name and dv_name on it, which would orphan a content-keyed entry.
+      @user_labels = {}.compare_by_identity
 
       # Register at_exit handler to ensure cleanup happens even on non-success exits
       # This handles cases like Ctrl+C, errors, or test failures that occur after
@@ -217,6 +220,7 @@ module Beaker
     def provision
       # rubocop:disable Style/CombinableLoops
       @logger.info("Starting KubeVirt provisioning with identifier: #{@test_group_identifier}")
+      validate_host_options
 
       @hosts.each do |host|
         create_vm(host)
@@ -251,6 +255,30 @@ module Beaker
     end
 
     private
+
+    ##
+    # Check every host's kubevirt_* options before anything is created, so a
+    # bad value on the last host fails before the first host's resources exist,
+    # and a bad grace window fails on every run rather than only on the run
+    # that hits a backoff. Each check is the accessor provisioning uses later,
+    # so validation and use cannot disagree. The parsed user labels are kept
+    # for get_labels.
+    # @raise [ArgumentError] when any host has an invalid option
+    def validate_host_options
+      @hosts.each do |host|
+        disk_cache(host)
+        node_selector(host)
+        tolerations(host)
+        user_annotations(host)
+        image_pull_grace(host)
+        unschedulable_grace(host)
+        @user_labels[host] = user_labels(host)
+      rescue ArgumentError => e
+        name = host.respond_to?(:name) ? host.name : host['name']
+        @logger.error("Invalid options for host #{name}: #{e.message}")
+        raise
+      end
+    end
 
     ##
     # Internal cleanup implementation that performs the actual cleanup work
@@ -582,7 +610,7 @@ module Beaker
 
     def get_labels(host)
       raw_name = host.respond_to?(:name) ? host.name : host['name']
-      user_labels(host).merge(
+      (@user_labels[host] ||= user_labels(host)).merge(
         'beaker/test-group' => @test_group_identifier,
         'beaker/host' => sanitize_k8s_label_value(raw_name),
       )
