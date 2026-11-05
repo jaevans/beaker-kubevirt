@@ -79,13 +79,17 @@ module Beaker
     end
 
     ##
-    # Get the virt-launcher pod backing a VMI.
+    # Get the virt-launcher pod backing a VMI. A terminating launcher and its
+    # replacement, or a migration's source and target, can match at once, and the
+    # list has no guaranteed order, so pick the newest pod that is not being
+    # deleted, falling back to the newest overall when every one is terminating.
     # @param [String] vmi_name The VMI name (== VM name)
-    # @return [Hash, nil] pod object, or nil if not yet scheduled
+    # @return [Hash, nil] pod object, or nil if none exists yet
     def get_virt_launcher_pod(vmi_name)
-      pods = @k8s_client.get_pods(namespace: @namespace,
-                                  label_selector: "kubevirt.io/vm=#{vmi_name}")
-      pods.first
+      pods = Array(@k8s_client.get_pods(namespace: @namespace,
+                                        label_selector: "kubevirt.io/vm=#{vmi_name}"))
+      live = pods.reject { |pod| pod.dig('metadata', 'deletionTimestamp') }
+      (live.empty? ? pods : live).max_by { |pod| pod.dig('metadata', 'creationTimestamp').to_s }
     rescue Kubeclient::ResourceNotFoundError
       nil
     end

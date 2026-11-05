@@ -6,6 +6,7 @@ require 'yaml'
 require 'base64'
 require 'socket'
 require 'tempfile'
+require 'time'
 
 begin
   require 'beaker'
@@ -192,9 +193,9 @@ module Beaker
       # "<pod_name>/<container>" => monotonic timestamp the container was first
       # seen backing off an image pull. Cleared once it is running or terminated.
       @image_pull_backoff_since = {}
-      # vm_name => { uid:, since: } — the virt-launcher pod's UID and the monotonic
-      # timestamp it was first seen unschedulable. Cleared as soon as the scheduler
-      # places it; restarted when a pod with a different UID replaces it.
+      # vm_name => { transitioned_at:, since: } — the VMI PodScheduled condition's
+      # lastTransitionTime and the monotonic timestamp it was first seen. Cleared as
+      # soon as the scheduler places the pod; restarted when lastTransitionTime changes.
       @unschedulable_since = {}
       # Keyed by identity: a host's contents change as provisioning stores
       # vm_name and dv_name on it, which would orphan a content-keyed entry.
@@ -1286,6 +1287,7 @@ module Beaker
 
             raise "VMI #{vm_name} entered terminal phase #{phase} before becoming Ready" if VMI_TERMINAL_PHASES.include?(phase)
 
+            check_vmi_schedulable!(host, vmi)
             check_virt_launcher_health!(host)
 
             sleep SLEEPWAIT
@@ -1338,11 +1340,11 @@ module Beaker
 
     ##
     # Inspect the virt-launcher pod backing a VMI and raise with a specific reason
-    # if it has already failed (OOMKilled, crash loops, a container that cannot run)
-    # or if the scheduler cannot place it, so we fail fast instead of waiting the
-    # full timeout. Image pull backoff is handled separately by
-    # check_image_pull_backoff!, since kubelet retries pulls and an early
-    # observation does not mean provisioning has failed.
+    # if it has already failed (OOMKilled, crash loops, a container that cannot run),
+    # so we fail fast instead of waiting the full timeout. Whether the scheduler can
+    # place the pod is read from the VMI by check_vmi_schedulable!. Image pull
+    # backoff is handled separately by check_image_pull_backoff!, since kubelet
+    # retries pulls and an early observation does not mean provisioning has failed.
     # @param [Host] host The host being provisioned, carrying 'vm_name'
     def check_virt_launcher_health!(host)
       vm_name = host['vm_name']
@@ -1353,15 +1355,13 @@ module Beaker
       # A pod replaced mid-provision -- rescheduled, or evicted while pulling --
       # starts the pull again on a node whose cache may be cold, and must not
       # inherit the window its predecessor already spent. Keying on the pod also
-      # means a momentary absence (API lag, or a `pods.first` that briefly sees
-      # the successor) neither resets nor shortens the window a live pod is
+      # means a momentary absence (API lag, or a lookup that briefly sees the
+      # successor) neither resets nor shortens the window a live pod is
       # accumulating.
       pod_name = pod.dig('metadata', 'name') || vm_name
 
       phase = pod.dig('status', 'phase')
       raise "virt-launcher pod for #{vm_name} entered phase #{phase}" if phase == 'Failed'
-
-      check_pod_schedulable!(host, vm_name, pod)
 
       statuses = Array(pod.dig('status', 'containerStatuses')) +
                  Array(pod.dig('status', 'initContainerStatuses'))
@@ -1465,15 +1465,19 @@ module Beaker
     # ("0/8 nodes are available: 5 Insufficient cpu") is the one that arrives with no
     # explanation at all.
     #
+    # KubeVirt copies the launcher pod's PodScheduled condition into the VMI's
+    # status.conditions, so this reads it there rather than picking one of possibly
+    # several launcher pods.
+    #
     # Being unschedulable is not immediately terminal, which is why the grace window
     # exists rather than raising on first sight. The reason is logged as soon as it is
     # seen, so it is never silent even when the window is set wide.
     #
-    # @param [Host] host The host being provisioned
-    # @param [String] vm_name
-    # @param [Hash] pod The virt-launcher pod
-    def check_pod_schedulable!(host, vm_name, pod)
-      condition = Array(pod.dig('status', 'conditions')).find { |c| c['type'] == 'PodScheduled' }
+    # @param [Host] host The host being provisioned, carrying 'vm_name'
+    # @param [Hash, nil] vmi The VMI object from the kubevirt API
+    def check_vmi_schedulable!(host, vmi)
+      vm_name = host['vm_name']
+      condition = Array(vmi&.dig('status', 'conditions')).find { |c| c['type'] == 'PodScheduled' }
       reason = (condition && condition['status'] == 'False') ? condition['reason'] : nil
 
       unless UNSCHEDULABLE_POD_REASONS.include?(reason)
@@ -1483,20 +1487,40 @@ module Beaker
 
       message = condition['message'].to_s
       grace = unschedulable_grace(host)
-      uid = pod.dig('metadata', 'uid')
+      transitioned_at = condition['lastTransitionTime']
       tracked = @unschedulable_since[vm_name]
-      # A replacement pod must get its own window, not inherit the elapsed time of
-      # the one it replaced.
-      if tracked.nil? || tracked[:uid] != uid
-        tracked = @unschedulable_since[vm_name] = { uid: uid, since: monotonic_time }
+      # A changed lastTransitionTime is a new episode (or a replacement pod) and must
+      # not inherit the elapsed time of the previous one.
+      if tracked.nil? || tracked[:transitioned_at] != transitioned_at
+        tracked = @unschedulable_since[vm_name] = { transitioned_at: transitioned_at, since: monotonic_time }
         @logger.warn("virt-launcher pod for #{vm_name} is #{reason}, allowing #{grace}s " \
                      "for capacity: #{message}")
       end
 
-      waited = monotonic_time - tracked[:since]
+      waited = unschedulable_elapsed(tracked)
       return if waited < grace
 
       raise "virt-launcher pod for #{vm_name} is still #{reason} after #{waited.round}s: #{message}"
+    end
+
+    ##
+    # Seconds a PodScheduled=False episode has lasted: the longer of the time this
+    # process has watched it and the time since the condition's lastTransitionTime.
+    # The second credits a host that sat unschedulable while earlier hosts were being
+    # waited on. It compares the local clock with the API server's, so it is floored
+    # at zero, and only the monotonic measure applies when it cannot be parsed.
+    # @param [Hash] tracked Entry from @unschedulable_since
+    # @return [Float]
+    def unschedulable_elapsed(tracked)
+      observed = monotonic_time - tracked[:since]
+      started = begin
+        Time.iso8601(tracked[:transitioned_at].to_s)
+      rescue ArgumentError
+        nil
+      end
+      return observed if started.nil?
+
+      [observed, wall_clock_time - started, 0].max
     end
 
     ##
@@ -1519,6 +1543,13 @@ module Beaker
     # @return [Float]
     def monotonic_time
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    ##
+    # Wall-clock now, for comparing against timestamps the API server reports.
+    # @return [Time]
+    def wall_clock_time
+      Time.now
     end
 
     ##
