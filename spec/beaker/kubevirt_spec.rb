@@ -2180,6 +2180,222 @@ RSpec.describe Beaker::Kubevirt do
     end
   end
 
+  describe '#node_selector' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+    let(:pool) { { 'node-pool.example.com/ci' => 'true' } }
+
+    it 'returns nil when not set' do
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host' })).to be_nil
+    end
+
+    it 'returns nil for an empty hash' do
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => {} })).to be_nil
+    end
+
+    it 'returns the host value' do
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => pool })).to eq(pool)
+    end
+
+    it 'falls back to the CONFIG value' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_node_selector: pool))
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host' })).to eq(pool)
+    end
+
+    it 'prefers the host value over CONFIG' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_node_selector: { 'other' => 'x' }))
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => pool })).to eq(pool)
+    end
+
+    it 'stringifies symbol keys and non-string values' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'node-pool.example.com/ci': true } }
+      expect(hypervisor.send(:node_selector, host)).to eq(pool)
+    end
+
+    it 'raises ArgumentError when not a hash' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => ['node-pool.example.com/ci=true'] }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /must be a hash/)
+    end
+
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => 5 }) }
+        .to raise_error(ArgumentError, /must be a hash of label keys to values, got 5/)
+    end
+
+    it 'parses BEAKER_kubevirt_node_selector and lets it replace the host value' do
+      ENV['BEAKER_kubevirt_node_selector'] = ' node-pool.example.com/ci=true , zone = a '
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'other' => 'x' } }
+      expect(hypervisor.send(:node_selector, host)).to eq('node-pool.example.com/ci' => 'true', 'zone' => 'a')
+    end
+
+    it 'keeps an = inside a BEAKER_kubevirt_node_selector value' do
+      ENV['BEAKER_kubevirt_node_selector'] = 'key=a=b'
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host' })).to eq('key' => 'a=b')
+    end
+
+    it 'raises ArgumentError for a nested value' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'pool' => %w[ci gpu] } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "pool" must be a single label value/)
+    end
+
+    it 'raises ArgumentError for a float value, which YAML may have changed' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'k8s-version' => 1.1 } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "k8s-version" must be a single label value, got 1.1/)
+    end
+
+    it 'accepts an integer value' do
+      expect(hypervisor.send(:node_selector, { 'name' => 'test-host', 'kubevirt_node_selector' => { 'gen' => 3 } })).to eq('gen' => '3')
+    end
+
+    it 'raises ArgumentError for a nil value' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'pool' => nil } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /value for "pool" must be a single label value/)
+    end
+
+    it 'raises ArgumentError when BEAKER_kubevirt_node_selector has no entries' do
+      ENV['BEAKER_kubevirt_node_selector'] = ' , '
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { 'pool' => 'ci' } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_node_selector is set but has no key=value entries/)
+    end
+
+    it 'raises ArgumentError for a BEAKER_kubevirt_node_selector entry without =' do
+      ENV['BEAKER_kubevirt_node_selector'] = 'node-pool.example.com/ci'
+      expect { hypervisor.send(:node_selector, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value/)
+    end
+  end
+
+  describe '#tolerations' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+    let(:ci_taint) { { 'key' => 'node-pool.example.com/ci', 'value' => 'true', 'effect' => 'NoSchedule' } }
+    let(:ci_toleration) { { 'key' => 'node-pool.example.com/ci', 'operator' => 'Equal', 'value' => 'true', 'effect' => 'NoSchedule' } }
+
+    it 'returns nil when not set' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to be_nil
+    end
+
+    it 'builds an Equal toleration from a host entry with a value' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [ci_taint] })).to eq([ci_toleration])
+    end
+
+    it 'builds an Exists toleration from an entry without a value' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'dedicated', 'effect' => 'NoExecute' }] }
+      expect(hypervisor.send(:tolerations, host)).to eq([{ 'key' => 'dedicated', 'operator' => 'Exists', 'effect' => 'NoExecute' }])
+    end
+
+    it 'keeps a boolean false value as the string "false"' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'dedicated', 'value' => false, 'effect' => 'NoSchedule' }] }
+      expect(hypervisor.send(:tolerations, host)).to eq([{ 'key' => 'dedicated', 'operator' => 'Equal', 'value' => 'false', 'effect' => 'NoSchedule' }])
+    end
+
+    it 'builds an Equal toleration for an explicit empty value' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'dedicated', 'value' => '', 'effect' => 'NoSchedule' }] }
+      expect(hypervisor.send(:tolerations, host)).to eq([{ 'key' => 'dedicated', 'operator' => 'Equal', 'value' => '', 'effect' => 'NoSchedule' }])
+    end
+
+    [
+      { 'key' => 'dedicated', 'operator' => 'Equal', 'effect' => 'NoSchedule' },
+      { key: 'x', operator: 'Exists', value: 'v', effect: 'NoSchedule' },
+      { 'key' => 'x', 'effect' => 'NoExecute', 'tolerationSeconds' => 300 },
+    ].each do |entry|
+      it "raises ArgumentError for unsupported fields in #{entry.inspect}" do
+        expect { hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [entry] }) }
+          .to raise_error(ArgumentError, /has unsupported fields (operator|tolerationSeconds); only key, value, effect are accepted/)
+      end
+    end
+
+    it 'accepts symbol keys' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ key: 'node-pool.example.com/ci', value: 'true', effect: 'NoSchedule' }] }
+      expect(hypervisor.send(:tolerations, host)).to eq([ci_toleration])
+    end
+
+    it 'falls back to the CONFIG value' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_tolerations: [ci_taint]))
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to eq([ci_toleration])
+    end
+
+    it 'raises ArgumentError for an unsupported effect' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [ci_taint.merge('effect' => 'NoRun')] }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /effect must be one of NoSchedule, PreferNoSchedule, NoExecute, got "NoRun"/)
+    end
+
+    it 'raises ArgumentError for an entry without a key' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'effect' => 'NoSchedule' }] }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /has no key/)
+    end
+
+    it 'raises ArgumentError when not a list' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => ci_taint }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /must be a list/)
+    end
+
+    it 'raises ArgumentError for a scalar' do
+      expect { hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => true }) }
+        .to raise_error(ArgumentError, /must be a list of key.value.effect entries, got true/)
+    end
+
+    it 'returns nil for an empty list' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [] })).to be_nil
+    end
+
+    it 'parses BEAKER_kubevirt_tolerations and lets it replace the host value' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true:NoSchedule, dedicated:NoExecute'
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'other', 'effect' => 'NoSchedule' }] }
+      expect(hypervisor.send(:tolerations, host)).to eq(
+        [ci_toleration, { 'key' => 'dedicated', 'operator' => 'Exists', 'effect' => 'NoExecute' }],
+      )
+    end
+
+    it 'distinguishes key=:Effect from key:Effect in BEAKER_kubevirt_tolerations' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'a=:NoSchedule,b:NoSchedule'
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to eq(
+        [
+          { 'key' => 'a', 'operator' => 'Equal', 'value' => '', 'effect' => 'NoSchedule' },
+          { 'key' => 'b', 'operator' => 'Exists', 'effect' => 'NoSchedule' },
+        ],
+      )
+    end
+
+    it 'raises ArgumentError when BEAKER_kubevirt_tolerations has no entries' do
+      ENV['BEAKER_kubevirt_tolerations'] = ','
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'key' => 'dedicated', 'effect' => 'NoSchedule' }] }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_tolerations is set but has no entries/)
+    end
+
+    it 'raises ArgumentError for a BEAKER_kubevirt_tolerations entry without an effect' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true'
+      expect { hypervisor.send(:tolerations, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value:Effect or key:Effect/)
+    end
+
+    it 'validates the effect from BEAKER_kubevirt_tolerations' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true:noschedule'
+      expect { hypervisor.send(:tolerations, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /got "noschedule"/)
+    end
+  end
+
+  describe '#generate_vm_spec placement' do
+    let(:host) do
+      {
+        'name' => 'test-host',
+        'kubevirt_node_selector' => { 'node-pool.example.com/ci' => 'true' },
+        'kubevirt_tolerations' => [{ 'key' => 'node-pool.example.com/ci', 'value' => 'true', 'effect' => 'NoSchedule' }],
+      }
+    end
+
+    def template_spec(hypervisor, host)
+      hypervisor.send(:generate_vm_spec, host, 'test-vm', 'cloud-init-secret').dig('spec', 'template', 'spec')
+    end
+
+    it 'puts nodeSelector and tolerations on the VM template' do
+      spec = template_spec(described_class.new(hosts, options), host)
+      expect(spec['nodeSelector']).to eq('node-pool.example.com/ci' => 'true')
+      expect(spec['tolerations']).to eq([{ 'key' => 'node-pool.example.com/ci', 'operator' => 'Equal', 'value' => 'true', 'effect' => 'NoSchedule' }])
+    end
+
+    it 'omits nodeSelector and tolerations when unset' do
+      spec = template_spec(described_class.new(hosts, options), { 'name' => 'test-host' })
+      expect(spec).not_to include('nodeSelector', 'tolerations')
+    end
+  end
+
   describe '#generate_hardware_spec' do
     let(:hypervisor) { described_class.new(hosts, options) }
     let(:host) { { 'name' => 'test-host', 'platform' => 'el-8-x86_64' } }

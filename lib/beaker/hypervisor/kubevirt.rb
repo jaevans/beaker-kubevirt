@@ -57,6 +57,10 @@ module Beaker
 
     # Values KubeVirt accepts for a disk's cache mode
     DISK_CACHE_MODES = %w[none writethrough writeback].freeze
+    # Taint effects a toleration may name
+    TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
+    # Fields a kubevirt_tolerations entry may set
+    TOLERATION_FIELDS = %w[key value effect].freeze
     # virt-launcher container waiting reasons we treat as fatal.
     FATAL_CONTAINER_WAITING_REASONS = %w[CrashLoopBackOff ImagePullBackOff ErrImagePull].freeze
     # virt-launcher container termination reasons we treat as fatal.
@@ -600,6 +604,106 @@ module Beaker
     end
 
     ##
+    # Node labels the VM's pod must match, from BEAKER_kubevirt_node_selector,
+    # the host or the global CONFIG, in that order. The variable is a
+    # comma-separated list of key=value pairs.
+    # @param [Host] host The host configuration
+    # @return [Hash{String=>String}, nil] The selector, or nil when unset
+    def node_selector(host)
+      env = env_option('kubevirt_node_selector')
+      selector = env ? parse_node_selector(env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
+      return nil if selector.nil?
+      raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
+      return nil if selector.empty?
+
+      selector.to_h do |key, value|
+        raise ArgumentError, "kubevirt_node_selector value for #{key.to_s.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
+
+        [key.to_s, value.to_s]
+      end
+    end
+
+    def scalar?(value)
+      case value
+      # Not Float: YAML reads an unquoted 1.10 as 1.1, which would select the
+      # wrong nodes without an error. A quoted value is unambiguous.
+      when String, Symbol, Integer, true, false then true
+      else false
+      end
+    end
+
+    def parse_node_selector(value)
+      pairs = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_kubevirt_node_selector is set but has no key=value entries: #{value.inspect}" if pairs.empty?
+
+      pairs.to_h do |pair|
+        key, label = pair.split('=', 2).map(&:strip)
+        raise ArgumentError, "BEAKER_kubevirt_node_selector entries must be key=value, got #{pair.inspect}" if label.nil? || key.empty?
+
+        [key, label]
+      end
+    end
+
+    ##
+    # Tolerations for the VM's pod, from BEAKER_kubevirt_tolerations, the host
+    # or the global CONFIG, in that order. Each entry has a key, an effect and
+    # an optional value; one without a value tolerates the key whatever its
+    # value. The variable is a comma-separated list of key=value:Effect or
+    # key:Effect entries.
+    # @param [Host] host The host configuration
+    # @return [Array<Hash>, nil] Kubernetes tolerations, or nil when unset
+    def tolerations(host)
+      env = env_option('kubevirt_tolerations')
+      list = env ? parse_tolerations(env) : host['kubevirt_tolerations'] || @options[:kubevirt_tolerations]
+      return nil if list.nil?
+      raise ArgumentError, "kubevirt_tolerations must be a list of key/value/effect entries, got #{list.inspect}" unless list.is_a?(Array)
+      return nil if list.empty?
+
+      list.map { |entry| build_toleration(entry) }
+    end
+
+    def parse_tolerations(value)
+      entries = value.split(',').map(&:strip).reject(&:empty?)
+      raise ArgumentError, "BEAKER_kubevirt_tolerations is set but has no entries: #{value.inspect}" if entries.empty?
+
+      entries.map do |entry|
+        taint, separator, effect = entry.rpartition(':')
+        raise ArgumentError, "BEAKER_kubevirt_tolerations entries must be key=value:Effect or key:Effect, got #{entry.inspect}" if separator.empty?
+
+        key, toleration_value = taint.split('=', 2)
+        { 'key' => key, 'value' => toleration_value, 'effect' => effect }
+      end
+    end
+
+    def build_toleration(entry)
+      raise ArgumentError, "Each kubevirt_tolerations entry must be a hash, got #{entry.inspect}" unless entry.is_a?(Hash)
+
+      # operator and tolerationSeconds are not supported. Dropping them silently
+      # would change what the toleration matches or how long it lasts.
+      unknown = entry.keys.map(&:to_s) - TOLERATION_FIELDS
+      unless unknown.empty?
+        raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has unsupported fields #{unknown.join(', ')}; " \
+                             "only #{TOLERATION_FIELDS.join(', ')} are accepted (an entry without a value tolerates any value)"
+      end
+
+      # key? rather than ||, so a YAML `value: false` is the string "false" and
+      # not a missing value, which would widen the toleration to Exists.
+      key, value, effect = %w[key value effect].map { |field| entry.key?(field) ? entry[field] : entry[field.to_sym] }
+      key = key.to_s.strip
+      effect = effect.to_s.strip
+      raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
+      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless TOLERATION_EFFECTS.include?(effect)
+
+      # Only an absent value means Exists. An explicit empty string is Equal "",
+      # which matches only taints whose value is empty.
+      if value.nil?
+        { 'key' => key, 'operator' => 'Exists', 'effect' => effect }
+      else
+        { 'key' => key, 'operator' => 'Equal', 'value' => value.to_s.strip, 'effect' => effect }
+      end
+    end
+
+    ##
     # Generate the hardware devices specification for the VM
     # @param [Host] host The host configuration
     # @return [Hash] Hardware devices specification
@@ -721,6 +825,8 @@ module Beaker
                 },
               },
               'hostname' => host_name,
+              'nodeSelector' => node_selector(host),
+              'tolerations' => tolerations(host),
               'networks' => generate_networks_spec(host),
               'readinessProbe' => generate_readiness_probe_spec(host),
               'volumes' => [
