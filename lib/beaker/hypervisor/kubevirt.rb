@@ -739,7 +739,7 @@ module Beaker
     # @return [Hash{String=>String}, nil] The selector, or nil when unset
     def node_selector(host)
       env = env_option('kubevirt_node_selector')
-      selector = env ? parse_node_selector(env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
+      selector = env ? parse_key_values('kubevirt_node_selector', env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
       return nil if selector.nil?
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
       return nil if selector.empty?
@@ -757,18 +757,6 @@ module Beaker
       # wrong nodes without an error. A quoted value is unambiguous.
       when String, Symbol, Integer, true, false then true
       else false
-      end
-    end
-
-    def parse_node_selector(value)
-      pairs = value.split(',').map(&:strip).reject(&:empty?)
-      raise ArgumentError, "BEAKER_kubevirt_node_selector is set but has no key=value entries: #{value.inspect}" if pairs.empty?
-
-      pairs.to_h do |pair|
-        key, label = pair.split('=', 2).map(&:strip)
-        raise ArgumentError, "BEAKER_kubevirt_node_selector entries must be key=value, got #{pair.inspect}" if label.nil? || key.empty?
-
-        [key, label]
       end
     end
 
