@@ -706,9 +706,12 @@ module Beaker
     # The value of an option from the BEAKER_<name> environment variable, the
     # host or the global CONFIG, in that order. The variable lets a CI
     # environment set the option for every nodeset it runs, as beaker-google's
-    # BEAKER_gce_* variables do; a blank variable is ignored. Every option a
-    # variable can override goes through here, so that they share one set of
-    # precedence and empty-value rules.
+    # BEAKER_gce_* variables do; a blank variable is ignored, and the value
+    # `default` unsets the option, ignoring the host and CONFIG. A variable
+    # that overrides a value the host set is logged, since the host may have
+    # set it deliberately. Beaker::Host#[] falls back to the global options,
+    # so only host_hash tells whether the host set the value itself. Every option a variable can override goes through
+    # here, so that they share one set of precedence and empty-value rules.
     # @param [Host] host The host configuration
     # @param [String] name The option name, e.g. 'kubevirt_disk_cache'
     # @yieldparam [Object] host_value The host's value
@@ -716,25 +719,47 @@ module Beaker
     # @yieldreturn [Object] The value to use when no variable is set; without a
     #   block, the host value unless it is nil or false, else the CONFIG value
     # @return [Array(Object, String)] The value, and the name of the variable
-    #   it came from, or nil when it came from the host or CONFIG. A value from
-    #   a variable is the stripped, unparsed string.
+    #   it came from, or nil when it came from the host or CONFIG or the
+    #   variable was `default`. A value from a variable is the stripped,
+    #   unparsed string.
     def layered_option(host, name)
-      variable, value = env_option(name)
-      return [value, variable] if variable
-
       host_value = host[name]
+      variable, value = env_option(name)
+      if variable
+        own_value = host.respond_to?(:host_hash) ? host.host_hash[name] : host_value
+        warn_env_override(host, name, variable, value, own_value) unless own_value.nil? || (own_value.respond_to?(:empty?) && own_value.empty?)
+        return value.casecmp?('default') ? [nil, nil] : [value, variable]
+      end
+
       config_value = @options[name.to_sym]
       [block_given? ? yield(host_value, config_value) : host_value || config_value, nil]
     end
 
     ##
+    # The environment variable that sets an option, spelt BEAKER_<name> or
+    # with the option name upper-cased to match the gem's other variables.
     # @param [String] name The option name
     # @return [Array(String, String), nil] The variable's name and stripped
-    #   value, or nil when it is unset or blank
+    #   value, or nil when neither spelling is set to a non-blank value
+    # @raise [ArgumentError] if both spellings are set to different values
     def env_option(name)
-      variable = "BEAKER_#{name}"
-      value = ENV.fetch(variable, nil)&.strip
-      [variable, value] unless value.nil? || value.empty?
+      set = ["BEAKER_#{name}", "BEAKER_#{name.upcase}"].uniq.filter_map do |variable|
+        value = ENV.fetch(variable, nil)&.strip
+        [variable, value] unless value.nil? || value.empty?
+      end
+      (lower, lower_value), (upper, upper_value) = set
+      raise ArgumentError, "#{lower}=#{lower_value.inspect} and #{upper}=#{upper_value.inspect} disagree; set only one of them" if upper && lower_value != upper_value
+
+      set.first
+    end
+
+    def warn_env_override(host, name, variable, value, host_value)
+      host_name = host.respond_to?(:name) ? host.name : host['name']
+      @warned_env_overrides ||= {}
+      return if @warned_env_overrides[[host_name, name]]
+
+      @warned_env_overrides[[host_name, name]] = true
+      @logger.warn("#{variable}=#{value.inspect} overrides #{name} #{host_value.inspect} set on host #{host_name}")
     end
 
     ##
