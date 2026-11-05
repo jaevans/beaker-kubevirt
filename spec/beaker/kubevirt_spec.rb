@@ -1376,6 +1376,32 @@ RSpec.describe Beaker::Kubevirt do
     it 'handles names that do not start with a letter' do
       expect(hypervisor.send(:sanitize_k8s_name, '1invalid-name')).to eq('x1invalid-name')
     end
+
+    def dns_label
+      /\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/
+    end
+
+    it 'leaves a 63-character name unchanged' do
+      name = "a#{'b' * 61}c"
+      expect(hypervisor.send(:sanitize_k8s_name, name)).to eq(name)
+    end
+
+    it 'returns a valid DNS label for 64 or more underscores' do
+      expect(hypervisor.send(:sanitize_k8s_name, '_' * 64)).to match(dns_label)
+    end
+
+    it 'does not end in a hyphen when the cut lands on one' do
+      # '-' at index 53 (where the digest prefix is cut) and 62 (the old 63-character cut)
+      name = "#{'a' * 53}-#{'a' * 8}-#{'b' * 10}"
+      expect(hypervisor.send(:sanitize_k8s_name, name)).to match(dns_label)
+    end
+
+    it 'keeps long names that differ only in the tail distinct' do
+      names = %w[host1 host2].map { |tail| hypervisor.send(:sanitize_k8s_name, "#{'a' * 70}-#{tail}") }
+
+      expect(names.uniq.size).to eq(2)
+      expect(names).to all(match(dns_label))
+    end
   end
 
   describe '#sanitize_k8s_label_value' do

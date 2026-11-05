@@ -356,7 +356,7 @@ module Beaker
       if vm_image&.start_with?('http://', 'https://')
         base_name = vm_image.split('/').last
         # Create a unique datavolume name by including the VM name in it
-        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{base_name}-dv")
+        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{base_name}-dv")
       elsif vm_image && !vm_image.start_with?('docker://', 'oci://')
         # For PVC sources, we also need to clone to avoid sharing the same disk
         source_pvc = vm_image.sub(%r{^pvc://}, '')
@@ -366,7 +366,7 @@ module Beaker
         else
           source_pvc_name = source_pvc
         end
-        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{source_pvc_name}")
+        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{source_pvc_name}")
 
       end
 
@@ -388,7 +388,7 @@ module Beaker
     def create_cloud_init_secret(host, cloud_init_data)
       raise 'Cloud-init data must be provided' unless cloud_init_data
 
-      secret_name = bounded_k8s_name("#{host['vm_name']}-cloud-init")
+      secret_name = sanitize_k8s_name("#{host['vm_name']}-cloud-init")
       @logger.debug("Creating cloud-init secret #{secret_name} in namespace #{@namespace}")
 
       secret_spec = {
@@ -416,25 +416,7 @@ module Beaker
     # @return [String] The generated VM name
     def generate_vm_name(host)
       host_name = host.respond_to?(:name) ? host.name : host['name']
-      bounded_k8s_name("#{@test_group_identifier}-#{host_name}")
-    end
-
-    ##
-    # Sanitize a name to a DNS label, keeping distinct inputs distinct when
-    # they exceed the 63-char cap.
-    #
-    # Plain truncation drops the tail, which is where the host name (or a
-    # suffix such as "-ssh") sits, so hosts sharing a long test-group
-    # identifier would collide. At the cap the tail is replaced with a digest
-    # of the untruncated name instead.
-    # @param [String] full_name The unsanitized name
-    # @return [String] A valid DNS label of at most 63 characters
-    def bounded_k8s_name(full_name)
-      name = sanitize_k8s_name(full_name)
-      return name if name.length < K8S_NAME_MAX
-
-      digest = Digest::SHA256.hexdigest(full_name)[0, 8]
-      "#{name[0, K8S_NAME_MAX - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
+      sanitize_k8s_name("#{@test_group_identifier}-#{host_name}")
     end
 
     ##
@@ -1485,7 +1467,7 @@ module Beaker
     # @param [Host] host The host
     def setup_nodeport(host)
       vm_name = host['vm_name']
-      service_name = bounded_k8s_name("#{vm_name}-ssh")
+      service_name = sanitize_k8s_name("#{vm_name}-ssh")
 
       @logger.debug("Creating NodePort service for VM #{vm_name}")
       service = @kubevirt_helper.create_nodeport_service(vm_name, service_name, @test_group_identifier)
@@ -1607,20 +1589,24 @@ module Beaker
       end
     end
 
+    ##
+    # Sanitize a name to a DNS label: lowercase, [a-z0-9-], starting with a
+    # letter and ending with a letter or digit.
+    #
+    # Plain truncation drops the tail, which is where the host name (or a
+    # suffix such as "-ssh") sits, so names sharing a long prefix would
+    # collide, and the cut can land on a '-'. Over the 63-character cap the
+    # tail is instead replaced with a digest of the unsanitized name.
+    # @param [String] name The unsanitized name
+    # @return [String] A valid DNS label of at most 63 characters
     def sanitize_k8s_name(name)
-      # Remove invalid characters, replace with hyphens
-      sanitized = name.downcase.gsub(/[^a-z0-9-]/, '-')
-
-      # Ensure it starts with a letter
+      sanitized = name.to_s.downcase.gsub(/[^a-z0-9-]/, '-')
       sanitized = "x#{sanitized}" unless /[a-z]/.match?(sanitized[0])
+      sanitized = "#{sanitized}0" if sanitized.end_with?('-')
+      return sanitized if sanitized.length <= K8S_NAME_MAX
 
-      # Ensure it doesn't end with a hyphen
-      sanitized = "#{sanitized}0" if sanitized[-1] == '-'
-
-      # Ensure it's not too long (max 63 chars for DNS label)
-      sanitized = sanitized[0..62] if sanitized.length > 63
-
-      sanitized
+      digest = Digest::SHA256.hexdigest(name.to_s)[0, 8]
+      "#{sanitized[0, K8S_NAME_MAX - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
     end
 
     ##
