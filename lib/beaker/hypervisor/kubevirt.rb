@@ -1001,7 +1001,7 @@ module Beaker
     # @raise [ArgumentError] when the memory or overhead cannot be parsed
     def memory_resources(host)
       memory = host['kubevirt_memory'] || @options[:kubevirt_memory] || '2Gi'
-      memory = "#{memory}Mi" if /^\d+$/.match?(memory)
+      memory = "#{memory}Mi" if /\A\d+\z/.match?(memory.to_s)
 
       overhead = host['kubevirt_memory_overhead'] || @options[:kubevirt_memory_overhead] || '512Mi'
       overhead = "#{overhead}Mi" if /\A\d+\z/.match?(overhead.to_s)

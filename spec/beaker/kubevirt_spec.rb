@@ -508,6 +508,12 @@ RSpec.describe Beaker::Kubevirt do
         expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'memory')).to eq('4Gi')
       end
 
+      it 'treats an unquoted YAML number for kubevirt_memory as MiB' do
+        options[:kubevirt_memory] = 2048
+        resources = vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources')
+        expect([resources.dig('requests', 'memory'), resources.dig('limits', 'memory')]).to eq(%w[2048Mi 2560Mi])
+      end
+
       it 'respects an overridden kubevirt_memory_overhead' do
         options[:kubevirt_memory_overhead] = '1Gi'
         expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits', 'memory')).to eq('5120Mi')
