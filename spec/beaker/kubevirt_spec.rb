@@ -2818,6 +2818,20 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /effect must be one of NoSchedule, PreferNoSchedule, NoExecute, got "NoRun"/)
     end
 
+    [nil, '', ' '].each do |effect|
+      it "omits the effect for an entry whose effect is #{effect.inspect}, tolerating every effect" do
+        entry = { 'key' => 'dedicated', 'value' => 'ci' }
+        entry['effect'] = effect unless effect.nil?
+        expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [entry] }))
+          .to eq([{ 'key' => 'dedicated', 'operator' => 'Equal', 'value' => 'ci' }])
+      end
+    end
+
+    it 'builds an Exists toleration for every effect from an entry with only a key' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [{ key: 'dedicated' }] }))
+        .to eq([{ 'key' => 'dedicated', 'operator' => 'Exists' }])
+    end
+
     it 'raises ArgumentError for an entry without a key' do
       host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ 'effect' => 'NoSchedule' }] }
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /has no key/)
@@ -2861,9 +2875,14 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_tolerations is set but has no entries/)
     end
 
-    it 'raises ArgumentError for a BEAKER_kubevirt_tolerations entry without an effect' do
-      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true'
-      expect { hypervisor.send(:tolerations, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value:Effect or key:Effect/)
+    it 'parses BEAKER_kubevirt_tolerations entries without an effect as tolerating every effect' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true, dedicated'
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to eq(
+        [
+          { 'key' => 'node-pool.example.com/ci', 'operator' => 'Equal', 'value' => 'true' },
+          { 'key' => 'dedicated', 'operator' => 'Exists' },
+        ],
+      )
     end
 
     it 'validates the effect from BEAKER_kubevirt_tolerations' do
