@@ -181,6 +181,73 @@ RSpec.describe Beaker::Kubevirt do
         expect(hypervisor).to have_received(:setup_networking).with(hosts[0])
       end
     end
+
+    context 'with several hosts' do
+      let(:hosts) do
+        %w[host-1 host-2 host-3].map do |name|
+          host = { 'name' => name, :platform => 'el-8-x86_64' }
+          def host.name
+            self['name']
+          end
+          host
+        end
+      end
+
+      before do
+        allow(hypervisor).to receive(:create_vm).and_call_original
+        allow(hypervisor).to receive(:setup_networking)
+        allow(hypervisor).to receive(:cleanup)
+      end
+
+      {
+        'kubevirt_disk_cache' => ['bogus', /kubevirt_disk_cache must be one of/],
+        'kubevirt_node_selector' => ['gpu', /kubevirt_node_selector must be a hash/],
+        'kubevirt_tolerations' => ['gpu', /kubevirt_tolerations must be a list/],
+        'kubevirt_labels' => [{ 'beaker/test-group' => 'x' }, %r{kubevirt_labels may not set beaker/test-group}],
+        'kubevirt_annotations' => [5, /kubevirt_annotations must be a hash/],
+        'kubevirt_image_pull_grace' => ['soon', /kubevirt_image_pull_grace must be a whole number of seconds/],
+        'kubevirt_unschedulable_grace' => [-1, /kubevirt_unschedulable_grace must be a whole number of seconds/],
+      }.each do |option, (value, message)|
+        it "rejects an invalid #{option} on the last host before creating anything for any host" do
+          hosts.last[option] = value
+          expect(kubevirt_helper).not_to receive(:create_secret)
+          expect(kubevirt_helper).not_to receive(:create_vm)
+
+          expect { hypervisor.provision }.to raise_error(ArgumentError, message)
+          expect(hypervisor).not_to have_received(:create_vm)
+          expect(hypervisor).not_to have_received(:wait_for_vm_ready)
+          expect(hypervisor).not_to have_received(:cleanup)
+        end
+      end
+
+      it 'rejects an invalid global grace window before creating anything' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_unschedulable_grace: 'later'))
+        allow(hypervisor).to receive(:create_vm)
+
+        expect { hypervisor.provision }.to raise_error(ArgumentError, /kubevirt_unschedulable_grace must be a whole number/)
+        expect(hypervisor).not_to have_received(:create_vm)
+      end
+
+      it "parses each host's labels once and labels every resource with them" do
+        labelled_options = options.merge(kubevirt_vm_image: 'http://example.com/disk.qcow2', kubevirt_labels: { 'team' => 'infra' })
+        hypervisor = described_class.new(hosts, labelled_options)
+        allow(hypervisor).to receive_messages(wait_for_vm_ready: nil, setup_networking: nil)
+        allow(hypervisor).to receive(:user_labels).and_call_original
+        secrets = []
+        vms = []
+        allow(kubevirt_helper).to receive(:create_secret) { |spec| secrets << spec }
+        allow(kubevirt_helper).to receive(:create_vm) { |spec| vms << spec }
+
+        hypervisor.provision
+
+        hosts.each { |host| expect(hypervisor).to have_received(:user_labels).with(host).once }
+        metadata = secrets.map { |secret| secret['metadata'] } + vms.flat_map do |vm|
+          [vm['metadata'], vm['spec']['template']['metadata']] + vm['spec']['dataVolumeTemplates'].map { |dv| dv['metadata'] }
+        end
+        expect(metadata.size).to eq(hosts.size * 4)
+        expect(metadata.map { |m| m['labels']['team'] }).to all(eq('infra'))
+      end
+    end
   end
 
   describe '#cleanup' do
