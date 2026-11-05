@@ -287,7 +287,7 @@ env:
   BEAKER_KUBEVIRT_TEST_GROUP: beaker-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
 ```
 
-Values that are not valid Kubernetes label values are sanitized (and a warning is logged), so prefer an identifier that is already label-safe — otherwise the label will not be the string you set.
+The identifier is used both as the label value and as the prefix of resource names, so it is normalised to a DNS label: lowercase letters, digits and `-`, starting with a letter and ending with a letter or digit. A value that needs changing (for example `CI_1`, which becomes `ci-1`) is used in its normalised form and a warning is logged. Prefer a value that is already in that form, since an external cleanup has to select on the normalised label, not the string you set. `github.job` can contain uppercase letters and `_`, so apply the same normalisation when building the cleanup selector from it.
 
 ## Requirements
 
