@@ -220,6 +220,58 @@ RSpec.describe Beaker::KubevirtHelper do
     end
   end
 
+  describe '#get_virt_launcher_pod' do
+    let(:k8s_client) { double('k8s_client') }
+    let(:helper) { described_class.new(options.merge(k8s_client: k8s_client)) }
+
+    def launcher(name, created, deleting: nil)
+      metadata = { 'name' => name, 'creationTimestamp' => created }
+      metadata['deletionTimestamp'] = deleting if deleting
+      { 'metadata' => metadata }
+    end
+
+    def stub_pods(*pods)
+      allow(k8s_client).to receive(:get_pods)
+        .with(namespace: 'test-namespace', label_selector: 'kubevirt.io/vm=my-vm')
+        .and_return(pods)
+    end
+
+    it 'returns nil when no launcher pod exists' do
+      stub_pods
+      expect(helper.get_virt_launcher_pod('my-vm')).to be_nil
+    end
+
+    it 'picks the newest pod regardless of list order' do
+      stub_pods(launcher('new', '2026-11-05T19:00:00Z'), launcher('old', '2026-11-05T18:00:00Z'))
+      expect(helper.get_virt_launcher_pod('my-vm').dig('metadata', 'name')).to eq('new')
+      stub_pods(launcher('old', '2026-11-05T18:00:00Z'), launcher('new', '2026-11-05T19:00:00Z'))
+      expect(helper.get_virt_launcher_pod('my-vm').dig('metadata', 'name')).to eq('new')
+    end
+
+    it 'skips a newer pod that is terminating in favour of a live one' do
+      stub_pods(launcher('live', '2026-11-05T18:00:00Z'),
+                launcher('terminating', '2026-11-05T19:00:00Z', deleting: '2026-11-05T19:05:00Z'))
+      expect(helper.get_virt_launcher_pod('my-vm').dig('metadata', 'name')).to eq('live')
+    end
+
+    it 'falls back to the newest pod when every one is terminating' do
+      stub_pods(launcher('old', '2026-11-05T18:00:00Z', deleting: '2026-11-05T19:05:00Z'),
+                launcher('new', '2026-11-05T19:00:00Z', deleting: '2026-11-05T19:05:00Z'))
+      expect(helper.get_virt_launcher_pod('my-vm').dig('metadata', 'name')).to eq('new')
+    end
+
+    it 'works on the RecursiveOpenStruct objects kubeclient returns by default' do
+      stub_pods(RecursiveOpenStruct.new(launcher('old', '2026-11-05T18:00:00Z'), recurse_over_arrays: true),
+                RecursiveOpenStruct.new(launcher('new', '2026-11-05T19:00:00Z'), recurse_over_arrays: true))
+      expect(helper.get_virt_launcher_pod('my-vm').dig('metadata', 'name')).to eq('new')
+    end
+
+    it 'returns nil when the pod list is not found' do
+      allow(k8s_client).to receive(:get_pods).and_raise(Kubeclient::ResourceNotFoundError)
+      expect(helper.get_virt_launcher_pod('my-vm')).to be_nil
+    end
+  end
+
   describe '#create_nodeport_service' do
     let(:k8s_client) { double('k8s_client') }
     let(:opts) { options.merge(k8s_client: k8s_client) }
