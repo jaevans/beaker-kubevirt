@@ -90,7 +90,7 @@ CONFIG:
 | `kubevirt_readiness_probe` | Probe tuning hash (snake_case keys): `initial_delay_seconds` (30), `period_seconds` (10), `timeout_seconds` (3), `failure_threshold` (60), `success_threshold` (1). The default failure budget (600s) accommodates slow Windows first-boots. When the probe is enabled, `timeout` is auto-raised to cover this budget. | No | see description | HOSTS (per-host), CONFIG |
 | `kubevirt_unschedulable_grace` | Seconds the virt-launcher pod may stay unschedulable (`PodScheduled=False`, reason `Unschedulable` or `SchedulerError`) before provisioning gives up and reports the scheduler's own message. Cannot be immediate — an unschedulable pod is precisely what tells a cluster autoscaler to add a node. Bounded by the effective `timeout`, which this does not raise. | No | `300` | HOSTS (per-host), CONFIG |
 | `kubevirt_disable_virtio` | Disable virtio devices (for Windows compatibility). If set to true the disk bus will be set to `sata` and the network adapter will be model `e1000` | No | `false` | HOSTS (per-host) |
-| `kubevirt_disk_cache` | Cache mode for the root disk: `none`, `writethrough` or `writeback`. Unset leaves the choice to KubeVirt (`none` when the backing store supports O_DIRECT). `writeback` lets the virt-launcher's page cache absorb guest writes until the guest flushes; use it for throwaway test VMs on slow or shared storage, where a lost VM only costs a re-run. | No | unset | HOSTS (per-host), CONFIG |
+| `kubevirt_disk_cache` | Cache mode for the root disk: `none`, `writethrough` or `writeback`. Unset leaves the choice to KubeVirt (`none` when the backing store supports O_DIRECT). `writeback` lets the virt-launcher's page cache absorb guest writes until the guest flushes; use it for throwaway test VMs on slow or shared storage, where a lost VM only costs a re-run. A non-empty `BEAKER_kubevirt_disk_cache` environment variable overrides both. | No | unset | `BEAKER_kubevirt_disk_cache`, HOSTS (per-host), CONFIG |
 
 **Important**: The `namespace`, `kubeconfig`, and `kubecontext` options must be specified in the global `CONFIG` section, not per-host. All VMs will be created in the same Kubernetes namespace.
 
@@ -259,6 +259,29 @@ All resources created are labeled for traceability and cleanup:
 - `beaker/host`: Host name from your Beaker inventory
 
 These labels are used during `cleanup` to remove VMs, secrets, and services associated with the test group.
+
+### Supplying the test-group identifier
+
+By default the test-group identifier is `beaker-<random hex>`, generated per process. Set `BEAKER_KUBEVIRT_TEST_GROUP` to choose it instead:
+
+```bash
+BEAKER_KUBEVIRT_TEST_GROUP="beaker-ci-${CI_JOB_ID}" bundle exec rake beaker
+```
+
+This matters when something outside the beaker process has to clean up after it. In CI, a cancelled job can be killed before beaker tears anything down, and with a random identifier the job has no way to name the resources it leaked. With a known identifier the job can delete by `beaker/test-group=<its own identifier>` once beaker is gone, without disturbing other runs that share the namespace:
+
+```bash
+kubectl -n "$namespace" delete vm,dv,secret,svc -l "beaker/test-group=beaker-ci-${CI_JOB_ID}"
+```
+
+The identifier must be unique to each run that can be live at the same time. It names the VMs, DataVolumes and Secrets as well as labelling them, so two runs that share it collide on create, and either run's cleanup deletes the other's resources. `CI_JOB_ID` is unique per job on GitLab. On GitHub Actions, `GITHUB_RUN_ID` is not: every job and matrix leg of a run shares it, and so do re-run attempts. Combine it with the attempt, the job and the matrix index, keeping the result within 63 characters (a longer value is refused rather than truncated, since truncation would cut off the part that tells runs apart):
+
+```yaml
+env:
+  BEAKER_KUBEVIRT_TEST_GROUP: beaker-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
+```
+
+Values that are not valid Kubernetes label values are sanitized (and a warning is logged), so prefer an identifier that is already label-safe — otherwise the label will not be the string you set.
 
 ## Requirements
 

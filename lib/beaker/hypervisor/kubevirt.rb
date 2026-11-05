@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'securerandom'
+require 'digest'
 require 'yaml'
 require 'base64'
 require 'socket'
@@ -130,7 +131,7 @@ module Beaker
       @hosts = kubevirt_hosts
       # Ensure the helper gets the validated namespace
       @kubevirt_helper = KubevirtHelper.new(@options)
-      @test_group_identifier = "beaker-#{SecureRandom.hex(4)}"
+      @test_group_identifier = configured_test_group_identifier || "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
       # vm_name => { uid:, since: } — the virt-launcher pod's UID and the monotonic
@@ -306,7 +307,7 @@ module Beaker
       if vm_image&.start_with?('http://', 'https://')
         base_name = vm_image.split('/').last
         # Create a unique datavolume name by including the VM name in it
-        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{base_name}-dv")
+        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{base_name}-dv")
       elsif vm_image && !vm_image.start_with?('docker://', 'oci://')
         # For PVC sources, we also need to clone to avoid sharing the same disk
         source_pvc = vm_image.sub(%r{^pvc://}, '')
@@ -316,7 +317,7 @@ module Beaker
         else
           source_pvc_name = source_pvc
         end
-        host['dv_name'] = sanitize_k8s_name("#{vm_name}-#{source_pvc_name}")
+        host['dv_name'] = bounded_k8s_name("#{vm_name}-#{source_pvc_name}")
 
       end
 
@@ -338,7 +339,7 @@ module Beaker
     def create_cloud_init_secret(host, cloud_init_data)
       raise 'Cloud-init data must be provided' unless cloud_init_data
 
-      secret_name = "#{host['vm_name']}-cloud-init"
+      secret_name = bounded_k8s_name("#{host['vm_name']}-cloud-init")
       @logger.debug("Creating cloud-init secret #{secret_name} in namespace #{@namespace}")
 
       secret_spec = {
@@ -366,7 +367,25 @@ module Beaker
     # @return [String] The generated VM name
     def generate_vm_name(host)
       host_name = host.respond_to?(:name) ? host.name : host['name']
-      sanitize_k8s_name("#{@test_group_identifier}-#{host_name}")
+      bounded_k8s_name("#{@test_group_identifier}-#{host_name}")
+    end
+
+    ##
+    # Sanitize a name to a DNS label, keeping distinct inputs distinct when
+    # they exceed the 63-char cap.
+    #
+    # Plain truncation drops the tail, which is where the host name (or a
+    # suffix such as "-ssh") sits, so hosts sharing a long test-group
+    # identifier would collide. At the cap the tail is replaced with a digest
+    # of the untruncated name instead.
+    # @param [String] full_name The unsanitized name
+    # @return [String] A valid DNS label of at most 63 characters
+    def bounded_k8s_name(full_name)
+      name = sanitize_k8s_name(full_name)
+      return name if name.length < K8S_NAME_MAX
+
+      digest = Digest::SHA256.hexdigest(full_name)[0, 8]
+      "#{name[0, K8S_NAME_MAX - digest.length - 1].sub(/-+\z/, '')}-#{digest}"
     end
 
     ##
@@ -471,6 +490,39 @@ module Beaker
       find_ssh_key_pair[:public_key]
     end
 
+    ##
+    # An externally supplied test-group identifier, from
+    # BEAKER_KUBEVIRT_TEST_GROUP.
+    #
+    # A caller that outlives the beaker process needs to be able to find this
+    # run's resources. CI is the motivating case: when a job is cancelled, the
+    # beaker process can be killed before it tears anything down, and a random
+    # per-process identifier leaves the job no way to name what it leaked.
+    # Deleting by `beaker/test-group=<the identifier it chose>` cleans up that
+    # run without touching other runs sharing the namespace.
+    #
+    # @return [String, nil] the sanitized identifier, or nil when unset or blank
+    def configured_test_group_identifier
+      raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '')
+      return nil if raw.strip.empty?
+
+      # Truncating would cut off the tail, which is usually the part that tells
+      # runs apart (job ID, matrix index), and give concurrent runs one label.
+      if raw.strip.length > LABEL_VALUE_MAX
+        raise ArgumentError, "BEAKER_KUBEVIRT_TEST_GROUP must be at most #{LABEL_VALUE_MAX} characters, " \
+                             "got #{raw.strip.length}: #{raw.inspect}"
+      end
+
+      identifier = sanitize_k8s_label_value(raw)
+      if identifier != raw
+        @logger.warn(
+          "BEAKER_KUBEVIRT_TEST_GROUP #{raw.inspect} is not usable as a Kubernetes " \
+          "label value; using #{identifier.inspect} instead",
+        )
+      end
+      identifier
+    end
+
     def get_labels(host)
       raw_name = host.respond_to?(:name) ? host.name : host['name']
       {
@@ -513,7 +565,20 @@ module Beaker
     end
 
     ##
-    # Cache mode for the root disk, from the host or the global CONFIG.
+    # The value of the BEAKER_<name> environment variable, which overrides the
+    # host and CONFIG settings of the option it names so that a CI environment
+    # can set it for every nodeset it runs, as beaker-google's BEAKER_gce_*
+    # variables do.
+    # @param [String] name The option name, e.g. 'kubevirt_disk_cache'
+    # @return [String, nil] The stripped value, or nil when unset or blank
+    def env_option(name)
+      value = ENV.fetch("BEAKER_#{name}", nil)&.strip
+      value unless value.nil? || value.empty?
+    end
+
+    ##
+    # Cache mode for the root disk, from BEAKER_kubevirt_disk_cache, the host
+    # or the global CONFIG, in that order.
     # Unset leaves the choice to KubeVirt, which uses none when the backing
     # store supports O_DIRECT and writethrough otherwise. writeback lets the
     # virt-launcher's page cache absorb guest writes until the guest flushes,
@@ -521,11 +586,15 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
     def disk_cache(host)
-      cache = host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
-      return nil if cache.nil? || cache.to_s.empty?
+      env = env_option('kubevirt_disk_cache')
+      value = env || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      return nil if value.nil? || value.to_s.empty?
 
-      cache = cache.to_s
-      raise ArgumentError, "kubevirt_disk_cache must be one of #{DISK_CACHE_MODES.join(', ')}, got #{cache.inspect}" unless DISK_CACHE_MODES.include?(cache)
+      cache = value.to_s.downcase
+      unless DISK_CACHE_MODES.include?(cache)
+        source = env ? 'BEAKER_kubevirt_disk_cache' : 'kubevirt_disk_cache'
+        raise ArgumentError, "#{source} must be one of #{DISK_CACHE_MODES.join(', ')}, got #{value.to_s.inspect}"
+      end
 
       cache
     end
@@ -1097,7 +1166,7 @@ module Beaker
     # @param [Host] host The host
     def setup_nodeport(host)
       vm_name = host['vm_name']
-      service_name = "#{vm_name}-ssh"
+      service_name = bounded_k8s_name("#{vm_name}-ssh")
 
       @logger.debug("Creating NodePort service for VM #{vm_name}")
       service = @kubevirt_helper.create_nodeport_service(vm_name, service_name, @test_group_identifier)
