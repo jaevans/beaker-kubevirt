@@ -5,7 +5,7 @@ require 'beaker/hypervisor/port_forward'
 require 'socket'
 require 'timeout'
 
-# rubocop:disable RSpec/SpecFilePathFormat
+# rubocop:disable-next RSpec/SpecFilePathFormat
 RSpec.describe KubeVirtPortForwarder do
   let(:kube_client) do
     instance_double(
@@ -212,7 +212,7 @@ RSpec.describe KubeVirtPortForwarder do
 
         expect(forwarder.state).to eq(:stopped)
         expect(captured).to be_a(RuntimeError)
-        expect(captured.message).to match(/reactor did not become ready within/)
+        expect(captured.message).to include('reactor did not become ready within')
       end
 
       it 'force-kills the reactor thread if it does not exit within the shutdown timeout' do
@@ -311,7 +311,7 @@ RSpec.describe KubeVirtPortForwarder do
 
         expect(forwarder2.state).to eq(:stopped)
         expect(captured).to be_a(RuntimeError)
-        expect(captured.message).to match(/reactor did not become ready within/)
+        expect(captured.message).to include('reactor did not become ready within')
       end
     end
   end
@@ -1535,7 +1535,7 @@ RSpec.describe KubeVirtPortForwarder do
 
       # Verify the token 'test-token' never appeared in any log message
       all_log_messages.each do |msg|
-        expect(msg).not_to match(/test-token/), "Bearer token found in log message: #{msg}"
+        expect(msg).not_to include('test-token'), "Bearer token found in log message: #{msg}"
       end
 
       # Verify we did capture log messages (test isn't passing vacuously)
@@ -1698,4 +1698,3 @@ RSpec.describe KubeVirtPortForwarder do
     end
   end
 end
-# rubocop:enable RSpec/SpecFilePathFormat
