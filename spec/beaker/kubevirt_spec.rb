@@ -2310,6 +2310,16 @@ RSpec.describe Beaker::Kubevirt do
         expect(result).not_to have_key('other')
       end
 
+      it 'raises ArgumentError for a key repeated in BEAKER_kubevirt_labels' do
+        ENV['BEAKER_kubevirt_labels'] = 'team=a, team = b'
+        expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, 'BEAKER_kubevirt_labels sets "team" more than once')
+      end
+
+      it 'raises ArgumentError for a symbol and a string spelling the same key' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { team: 'a', 'team' => 'b' })) }
+          .to raise_error(ArgumentError, 'kubevirt_labels sets "team" more than once')
+      end
+
       it 'raises ArgumentError for a BEAKER_kubevirt_labels entry without =' do
         ENV['BEAKER_kubevirt_labels'] = 'team'
         expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_labels entries must be key=value/)
@@ -2408,6 +2418,11 @@ RSpec.describe Beaker::Kubevirt do
     it 'raises ArgumentError for a nested value' do
       host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/cfg' => { 'a' => 1 } } }
       expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations value for "example.com.cfg" must be a single value/)
+    end
+
+    it 'raises ArgumentError for a symbol and a string spelling the same key' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note': 'a', 'example.com/note' => 'b' } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, 'kubevirt_annotations sets "example.com/note" more than once')
     end
 
     it 'raises ArgumentError for an invalid annotation key' do
@@ -2725,6 +2740,17 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_node_selector is set but has no key=value entries/)
     end
 
+    it 'raises ArgumentError for a key repeated in BEAKER_kubevirt_node_selector' do
+      ENV['BEAKER_kubevirt_node_selector'] = 'pool=ci,pool=gpu'
+      expect { hypervisor.send(:node_selector, { 'name' => 'test-host' }) }
+        .to raise_error(ArgumentError, 'BEAKER_kubevirt_node_selector sets "pool" more than once')
+    end
+
+    it 'raises ArgumentError for a symbol and a string spelling the same key' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { pool: 'ci', 'pool' => 'gpu' } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, 'kubevirt_node_selector sets "pool" more than once')
+    end
+
     it 'raises ArgumentError for a BEAKER_kubevirt_node_selector entry without =' do
       ENV['BEAKER_kubevirt_node_selector'] = 'node-pool.example.com/ci'
       expect { hypervisor.send(:node_selector, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value/)
@@ -2773,6 +2799,11 @@ RSpec.describe Beaker::Kubevirt do
     it 'accepts symbol keys' do
       host = { 'name' => 'test-host', 'kubevirt_tolerations' => [{ key: 'node-pool.example.com/ci', value: 'true', effect: 'NoSchedule' }] }
       expect(hypervisor.send(:tolerations, host)).to eq([ci_toleration])
+    end
+
+    it 'raises ArgumentError for a field given as both a symbol and a string' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [ci_taint.merge(value: 'false')] }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, 'kubevirt_tolerations entry sets "value" more than once')
     end
 
     it 'falls back to the CONFIG value' do

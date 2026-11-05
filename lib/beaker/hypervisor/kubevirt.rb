@@ -632,8 +632,7 @@ module Beaker
       return {} if value.nil?
       raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
 
-      value.to_h do |key, val|
-        key = key.to_s
+      string_keys(name, value).to_h do |key, val|
         unless qualified_key?(key)
           raise ArgumentError, "#{name} key #{key.inspect} is not a valid Kubernetes key: expected an optional DNS subdomain " \
                                "prefix and '/', then a name of at most #{LABEL_VALUE_MAX} characters of letters, digits, " \
@@ -669,11 +668,28 @@ module Beaker
       pairs = value.split(',').map(&:strip).reject(&:empty?)
       raise ArgumentError, "#{variable} is set but has no key=value entries: #{value.inspect}" if pairs.empty?
 
-      pairs.to_h do |pair|
+      pairs.each_with_object({}) do |pair, parsed|
         key, val = pair.split('=', 2).map(&:strip)
         raise ArgumentError, "#{variable} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
+        raise ArgumentError, "#{variable} sets #{key.inspect} more than once" if parsed.key?(key)
 
-        [key, val]
+        parsed[key] = val
+      end
+    end
+
+    ##
+    # A hash with its keys converted to strings. YAML and Ruby both allow a
+    # symbol and a string that convert to the same key, and the later one
+    # would silently win, so that raises instead.
+    # @param [String] name The option name, for error messages
+    # @param [Hash] hash
+    # @return [Hash{String=>Object}]
+    def string_keys(name, hash)
+      hash.each_with_object({}) do |(key, value), converted|
+        key = key.to_s
+        raise ArgumentError, "#{name} sets #{key.inspect} more than once" if converted.key?(key)
+
+        converted[key] = value
       end
     end
 
@@ -802,10 +818,10 @@ module Beaker
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
       return nil if selector.empty?
 
-      selector.to_h do |key, value|
-        raise ArgumentError, "kubevirt_node_selector value for #{key.to_s.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
+      string_keys('kubevirt_node_selector', selector).to_h do |key, value|
+        raise ArgumentError, "kubevirt_node_selector value for #{key.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
 
-        [key.to_s, value.to_s]
+        [key, value.to_s]
       end
     end
 
@@ -854,15 +870,16 @@ module Beaker
 
       # operator and tolerationSeconds are not supported. Dropping them silently
       # would change what the toleration matches or how long it lasts.
-      unknown = entry.keys.map(&:to_s) - TOLERATION_FIELDS
+      fields = string_keys('kubevirt_tolerations entry', entry)
+      unknown = fields.keys - TOLERATION_FIELDS
       unless unknown.empty?
         raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has unsupported fields #{unknown.join(', ')}; " \
                              "only #{TOLERATION_FIELDS.join(', ')} are accepted (an entry without a value tolerates any value)"
       end
 
-      # key? rather than ||, so a YAML `value: false` is the string "false" and
-      # not a missing value, which would widen the toleration to Exists.
-      key, value, effect = %w[key value effect].map { |field| entry.key?(field) ? entry[field] : entry[field.to_sym] }
+      # Not ||, so a YAML `value: false` is the string "false" and not a
+      # missing value, which would widen the toleration to Exists.
+      key, value, effect = fields.values_at('key', 'value', 'effect')
       key = key.to_s.strip
       effect = effect.to_s.strip
       raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
