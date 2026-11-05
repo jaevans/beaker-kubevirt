@@ -961,6 +961,8 @@ RSpec.describe Beaker::Kubevirt do
       [
         'pull access denied for registry.example.com/foo, repository does not exist or may require authorization',
         'denied: requested access to the resource is denied',
+        'failed to resolve reference "registry.example.com/nope:latest": repository does not exist',
+        'failed to resolve reference "registry.example.com/nope:latest": name unknown: repository name not known to registry',
       ].each do |message|
         it "raises immediately on #{message.inspect}" do
           allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi)
@@ -976,6 +978,28 @@ RSpec.describe Beaker::Kubevirt do
           'failed to extract layer: open /var/lib/containerd/io.containerd.content.v1.content/ingest/abc/data: permission denied',
       }.each do |description, message|
         it "gives #{description} the grace window" do
+          allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
+          allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', message), nil)
+          expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+        end
+      end
+
+      {
+        'a containerd blob 404' =>
+          'failed to pull and unpack image "registry.example.com/foo:latest": failed to copy: httpReadSeeker: failed open: ' \
+          'content at https://127.0.0.1:31000/v2/foo/blobs/sha256:abc: not found',
+        'a zot mirror 503 on ErrImagePull' =>
+          'failed to pull and unpack image "quay.io/containerdisks/fedora:no-such-tag-9z": failed to resolve reference ' \
+          '"quay.io/containerdisks/fedora:no-such-tag-9z": unexpected status from HEAD request to ' \
+          'http://127.0.0.1:31000/v2/quay.io/containerdisks/fedora/manifests/no-such-tag-9z?ns=quay.io: 503 Service Unavailable',
+        'a zot mirror 503 on ImagePullBackOff' =>
+          'Back-off pulling image "quay.io/containerdisks/fedora:no-such-tag-9z": ErrImagePull: failed to pull and unpack ' \
+          'image "quay.io/containerdisks/fedora:no-such-tag-9z": failed to resolve reference ' \
+          '"quay.io/containerdisks/fedora:no-such-tag-9z": unexpected status from HEAD request to ' \
+          'http://127.0.0.1:31000/v2/quay.io/containerdisks/fedora/manifests/no-such-tag-9z?ns=quay.io: 503 Service Unavailable',
+      }.each do |description, message|
+        it "does not fail fast on #{description}" do
+          expect(described_class::DEFINITIVE_IMAGE_PULL_FAILURE_RE).not_to match(message)
           allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, pending_vmi, running_vmi)
           allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(waiting_pod('ErrImagePull', message), nil)
           expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
