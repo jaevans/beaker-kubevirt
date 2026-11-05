@@ -23,6 +23,18 @@ RSpec.describe Beaker::Kubevirt do
 
   let(:kubevirt_helper) { instance_double(Beaker::KubevirtHelper) }
 
+  # BEAKER_kubevirt_* variables override host and CONFIG settings. Clear every
+  # one for each example so a value exported in the developer's environment
+  # cannot change the results, and restore them afterwards.
+  around do |example|
+    saved = ENV.to_h.select { |name, _| name.start_with?('BEAKER_kubevirt_') }
+    saved.each_key { |name| ENV.delete(name) }
+    example.run
+  ensure
+    ENV.each_key.select { |name| name.start_with?('BEAKER_kubevirt_') }.each { |name| ENV.delete(name) }
+    saved&.each { |name, value| ENV[name] = value }
+  end
+
   before do
     allow(Beaker::KubevirtHelper).to receive(:new).and_return(kubevirt_helper)
     allow(kubevirt_helper).to receive(:namespace).and_return('beaker-test')
@@ -1777,6 +1789,55 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'raises ArgumentError' do
         expect { hypervisor.send(:disk_cache, host) }.to raise_error(ArgumentError, /kubevirt_disk_cache must be one of none, writethrough, writeback/)
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is set' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = ' writeback '
+      end
+
+      it 'is used when nothing else is set' do
+        expect(described_class.new(hosts, options).send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
+      end
+
+      it 'overrides the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' })).to eq('writeback')
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is invalid' do
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = 'unsafe'
+      end
+
+      it 'raises ArgumentError naming the variable' do
+        expect { hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' }) }
+          .to raise_error(ArgumentError, /\ABEAKER_kubevirt_disk_cache must be one of none, writethrough, writeback, got "unsafe"/)
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is upper case' do
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = 'WriteBack'
+      end
+
+      it 'is folded to lower case' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is blank' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = '  '
+      end
+
+      it 'falls through to the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host' })).to eq('writethrough')
       end
     end
   end
