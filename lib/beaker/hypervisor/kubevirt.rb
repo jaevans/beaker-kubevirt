@@ -843,10 +843,11 @@ module Beaker
 
     ##
     # Tolerations for the VM's pod, from BEAKER_kubevirt_tolerations, the host
-    # or the global CONFIG, in that order. Each entry has a key, an effect and
-    # an optional value; one without a value tolerates the key whatever its
-    # value. The variable is a comma-separated list of key=value:Effect or
-    # key:Effect entries.
+    # or the global CONFIG, in that order. Each entry has a key, an optional
+    # value and an optional effect; one without a value tolerates the key
+    # whatever its value, and one without an effect tolerates every effect,
+    # as Kubernetes treats an empty effect. The variable is a comma-separated
+    # list of key=value:Effect, key:Effect, key=value or key entries.
     # @param [Host] host The host configuration
     # @return [Array<Hash>, nil] Kubernetes tolerations, or nil when unset
     def tolerations(host)
@@ -864,9 +865,13 @@ module Beaker
       raise ArgumentError, "#{variable} is set but has no entries: #{value.inspect}" if entries.empty?
 
       entries.map do |entry|
+        # Neither a taint key nor its value may contain ':', so the last one
+        # can only introduce the effect.
         taint, separator, effect = entry.rpartition(':')
-        raise ArgumentError, "#{variable} entries must be key=value:Effect or key:Effect, got #{entry.inspect}" if separator.empty?
-
+        if separator.empty?
+          taint = effect
+          effect = nil
+        end
         key, toleration_value = taint.split('=', 2)
         { 'key' => key, 'value' => toleration_value, 'effect' => effect }
       end
@@ -890,15 +895,14 @@ module Beaker
       key = key.to_s.strip
       effect = effect.to_s.strip
       raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
-      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless TOLERATION_EFFECTS.include?(effect)
+      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless effect.empty? || TOLERATION_EFFECTS.include?(effect)
 
       # Only an absent value means Exists. An explicit empty string is Equal "",
       # which matches only taints whose value is empty.
-      if value.nil?
-        { 'key' => key, 'operator' => 'Exists', 'effect' => effect }
-      else
-        { 'key' => key, 'operator' => 'Equal', 'value' => value.to_s.strip, 'effect' => effect }
-      end
+      toleration = { 'key' => key }
+      toleration.merge!(value.nil? ? { 'operator' => 'Exists' } : { 'operator' => 'Equal', 'value' => value.to_s.strip })
+      toleration['effect'] = effect unless effect.empty?
+      toleration
     end
 
     ##
