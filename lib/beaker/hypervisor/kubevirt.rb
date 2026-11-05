@@ -57,6 +57,7 @@ module Beaker
 
     # Values KubeVirt accepts for a disk's cache mode
     DISK_CACHE_MODES = %w[none writethrough writeback].freeze
+    NETWORK_MODES = %w[port-forward nodeport multus].freeze
     # Taint effects a toleration may name
     TOLERATION_EFFECTS = %w[NoSchedule PreferNoSchedule NoExecute].freeze
     # Fields a kubevirt_tolerations entry may set
@@ -263,7 +264,7 @@ module Beaker
     # that hits a backoff. Each check is the accessor provisioning uses later,
     # so validation and use cannot disagree. The parsed user labels are kept
     # for get_labels.
-    # @raise [ArgumentError] when any host has an invalid option
+    # @raise [ArgumentError, RuntimeError] when any host has an invalid option
     def validate_host_options
       @hosts.each do |host|
         disk_cache(host)
@@ -272,8 +273,11 @@ module Beaker
         user_annotations(host)
         image_pull_grace(host)
         unschedulable_grace(host)
+        network_mode(host)
+        vm_image(host)
+        memory_resources(host)
         @user_labels[host] = user_labels(host)
-      rescue ArgumentError => e
+      rescue StandardError => e
         name = host.respond_to?(:name) ? host.name : host['name']
         @logger.error("Invalid options for host #{name}: #{e.message}")
         raise
@@ -388,8 +392,8 @@ module Beaker
       host['vm_name'] = vm_name
 
       # Generate DataVolume name if applicable and store it for consistency
-      vm_image = host['kubevirt_vm_image'] || @options[:kubevirt_vm_image]
-      if vm_image&.start_with?('http://', 'https://')
+      vm_image = vm_image(host)
+      if vm_image.start_with?('http://', 'https://')
         base_name = vm_image.split('/').last
         # Create a unique datavolume name by including the VM name in it
         host['dv_name'] = bounded_k8s_name("#{vm_name}-#{base_name}-dv")
@@ -973,6 +977,41 @@ module Beaker
     end
 
     ##
+    # The root disk image, from the host or the global CONFIG.
+    # @param [Host] host The host configuration
+    # @return [String] The image reference
+    # @raise [ArgumentError] when neither sets one
+    def vm_image(host)
+      image = host['kubevirt_vm_image'] || @options[:kubevirt_vm_image]
+      return image if image
+
+      host_name = host.respond_to?(:name) ? host.name : host['name']
+      raise ArgumentError,
+            "kubevirt_vm_image must be specified for host '#{host_name}' " \
+            '(set in host configuration or global options)'
+    end
+
+    ##
+    # Guest memory and the virt-launcher pod's memory request and limit, from
+    # kubevirt_memory, kubevirt_memory_overhead and kubevirt_memory_request on
+    # the host or the global CONFIG. Bare numbers are MiB. The limit is the
+    # guest memory plus the overhead.
+    # @param [Host] host The host configuration
+    # @return [Hash{Symbol=>String}] :guest, :request and :limit quantities
+    # @raise [ArgumentError] when the memory or overhead cannot be parsed
+    def memory_resources(host)
+      memory = host['kubevirt_memory'] || @options[:kubevirt_memory] || '2Gi'
+      memory = "#{memory}Mi" if /^\d+$/.match?(memory)
+
+      overhead = host['kubevirt_memory_overhead'] || @options[:kubevirt_memory_overhead] || '512Mi'
+      overhead = "#{overhead}Mi" if /\A\d+\z/.match?(overhead.to_s)
+      request = host['kubevirt_memory_request'] || @options[:kubevirt_memory_request] || memory
+      request = "#{request}Mi" if /\A\d+\z/.match?(request.to_s)
+
+      { guest: memory, request: request, limit: "#{parse_memory_mib(memory) + parse_memory_mib(overhead)}Mi" }
+    end
+
+    ##
     # Generate VM specification for KubeVirt
     # @param [Host] host The host configuration
     # @param [String] vm_name The VM name
@@ -980,15 +1019,7 @@ module Beaker
     # @return [Hash] VM specification
     def generate_vm_spec(host, vm_name, cloud_init_secret)
       cpu = host['kubevirt_cpus'] || @options[:kubevirt_cpus] || '1'
-      memory = host['kubevirt_memory'] || @options[:kubevirt_memory] || '2Gi'
-      # If the memory is a plain number, assume MiB
-      memory = "#{memory}Mi" if /^\d+$/.match?(memory)
-
-      overhead = host['kubevirt_memory_overhead'] || @options[:kubevirt_memory_overhead] || '512Mi'
-      overhead = "#{overhead}Mi" if /\A\d+\z/.match?(overhead.to_s)
-      memory_request = host['kubevirt_memory_request'] || @options[:kubevirt_memory_request] || memory
-      memory_request = "#{memory_request}Mi" if /\A\d+\z/.match?(memory_request.to_s)
-      memory_limit = "#{parse_memory_mib(memory) + parse_memory_mib(overhead)}Mi"
+      memory, memory_request, memory_limit = memory_resources(host).values_at(:guest, :request, :limit)
 
       # Both unset by default: KubeVirt then derives the pod's CPU request from the guest core
       # count divided by the cluster's cpuAllocationRatio, and sets no limit at all.
@@ -999,14 +1030,8 @@ module Beaker
       resource_limits = { 'memory' => memory_limit }
       resource_limits['cpu'] = cpu_limit.to_s if cpu_limit
 
-      vm_image = host['kubevirt_vm_image'] || @options[:kubevirt_vm_image]
+      vm_image = vm_image(host)
       host_name = host.respond_to?(:name) ? host.name : host['name']
-
-      unless vm_image
-        raise ArgumentError,
-              "kubevirt_vm_image must be specified for host '#{host_name}' " \
-              '(set in host configuration or global options)'
-      end
 
       {
         'apiVersion' => 'kubevirt.io/v1',
@@ -1083,7 +1108,7 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [Array] Networks specification
     def generate_networks_spec(host)
-      if host['kubevirt_network_mode'] == 'multus'
+      if network_mode(host) == 'multus'
         # Multus network configuration
         multus_networks = host['networks'] || []
         multus_networks.map do |net|
@@ -1519,7 +1544,7 @@ module Beaker
       opt_val = @options[:kubevirt_readiness_probe_disabled]
       return opt_val unless opt_val.nil?
 
-      (host['kubevirt_network_mode'] || 'port-forward') == 'multus'
+      network_mode(host) == 'multus'
     end
 
     ##
@@ -1547,20 +1572,28 @@ module Beaker
     end
 
     ##
+    # How the host's VM is reached: port-forward (the default), nodeport or multus.
+    # @param [Host] host The host configuration
+    # @return [String] One of NETWORK_MODES
+    # @raise [RuntimeError] for any other value
+    def network_mode(host)
+      mode = host['kubevirt_network_mode'] || 'port-forward'
+      raise "Unsupported network mode: #{mode}" unless NETWORK_MODES.include?(mode)
+
+      mode
+    end
+
+    ##
     # Setup networking for the VM
     # @param [Host] host The host to setup networking for
     def setup_networking(host)
-      network_mode = host['kubevirt_network_mode'] || 'port-forward'
-
-      case network_mode
+      case network_mode(host)
       when 'port-forward'
         setup_port_forward(host, vm_ssh_port(host))
       when 'nodeport'
         setup_nodeport(host)
       when 'multus'
         setup_multus_networking(host)
-      else
-        raise "Unsupported network mode: #{network_mode}"
       end
 
       # Configure SSH keys - ensure we use the matching private key for the public key

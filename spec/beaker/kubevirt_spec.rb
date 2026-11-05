@@ -213,17 +213,34 @@ RSpec.describe Beaker::Kubevirt do
         'kubevirt_annotations' => [5, /kubevirt_annotations must be a hash/],
         'kubevirt_image_pull_grace' => ['soon', /kubevirt_image_pull_grace must be a whole number of seconds/],
         'kubevirt_unschedulable_grace' => [-1, /kubevirt_unschedulable_grace must be a whole number of seconds/],
+        'kubevirt_memory' => ['2GB', /Cannot parse memory value "2GB"/],
+        'kubevirt_memory_overhead' => ['1G', /Cannot parse memory value "1G"/],
+        'kubevirt_network_mode' => ['bridge', /Unsupported network mode: bridge/],
       }.each do |option, (value, message)|
         it "rejects an invalid #{option} on the last host before creating anything for any host" do
           hosts.last[option] = value
           expect(kubevirt_helper).not_to receive(:create_secret)
           expect(kubevirt_helper).not_to receive(:create_vm)
 
-          expect { hypervisor.provision }.to raise_error(ArgumentError, message)
+          expect { hypervisor.provision }.to raise_error(StandardError, message)
           expect(hypervisor).not_to have_received(:create_vm)
           expect(hypervisor).not_to have_received(:wait_for_vm_ready)
           expect(hypervisor).not_to have_received(:cleanup)
         end
+      end
+
+      it 'rejects a missing kubevirt_vm_image on the last host before creating anything for any host' do
+        hypervisor = described_class.new(hosts, options.except(:kubevirt_vm_image))
+        allow(hypervisor).to receive(:create_vm).and_call_original
+        allow(hypervisor).to receive_messages(wait_for_vm_ready: nil, cleanup: nil)
+        hosts[0..-2].each { |host| host['kubevirt_vm_image'] = 'docker://quay.io/example/disk' }
+        expect(kubevirt_helper).not_to receive(:create_secret)
+        expect(kubevirt_helper).not_to receive(:create_vm)
+
+        expect { hypervisor.provision }.to raise_error(ArgumentError, /kubevirt_vm_image must be specified for host 'host-3'/)
+        expect(hypervisor).not_to have_received(:create_vm)
+        expect(hypervisor).not_to have_received(:wait_for_vm_ready)
+        expect(hypervisor).not_to have_received(:cleanup)
       end
 
       it 'rejects an invalid global grace window before creating anything' do
