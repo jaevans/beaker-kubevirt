@@ -22,6 +22,17 @@ RSpec.describe Beaker::Kubevirt do
   end
 
   let(:kubevirt_helper) { instance_double(Beaker::KubevirtHelper) }
+  # Pin BEAKER_KUBEVIRT_TEST_GROUP for every example, so a value in the
+  # developer's own environment cannot change the identifier under test.
+  let(:env_value) { nil }
+
+  around do |example|
+    previous = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', nil)
+    ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = env_value
+    example.run
+  ensure
+    ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
+  end
 
   # BEAKER_kubevirt_* variables override host and CONFIG settings. Clear every
   # one for each example so a value exported in the developer's environment
@@ -42,6 +53,10 @@ RSpec.describe Beaker::Kubevirt do
 
   describe '#initialize' do
     let(:hypervisor) { described_class.new(hosts, options) }
+
+    def identifier_for(opts = options)
+      described_class.new(hosts, opts).instance_variable_get(:@test_group_identifier)
+    end
 
     it 'is a Kubevirt hypervisor' do
       expect(hypervisor).to be_instance_of(described_class)
@@ -73,6 +88,56 @@ RSpec.describe Beaker::Kubevirt do
       test_group_id = hypervisor.instance_variable_get(:@test_group_identifier)
 
       expect(test_group_id).to match(/^beaker-[a-f0-9]{8}$/)
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is set' do
+      let(:env_value) { 'beaker-ci-12345' }
+
+      it 'uses the supplied identifier' do
+        expect(identifier_for).to eq('beaker-ci-12345')
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is longer than 63 characters' do
+      let(:env_value) { "beaker-#{'x' * 50}-matrix-leg-7" }
+
+      it 'raises instead of truncating it' do
+        expect { described_class.new(hosts, options) }
+          .to raise_error(ArgumentError, /BEAKER_KUBEVIRT_TEST_GROUP must be at most 63 characters, got #{env_value.length}/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is blank' do
+      let(:env_value) { '   ' }
+
+      it 'falls back to a generated identifier' do
+        expect(identifier_for).to match(/^beaker-[a-f0-9]{8}$/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP has surrounding whitespace' do
+      let(:env_value) { ' beaker-ci-123 ' }
+      let(:logger) { instance_double(Logger).as_null_object }
+
+      it 'strips it and warns that the identifier was changed' do
+        expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-123')
+        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is not a valid label value' do
+      let(:env_value) { 'beaker/ci run!' }
+      let(:logger) { instance_double(Logger).as_null_object }
+
+      it 'sanitizes it so the label can be selected on' do
+        expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-run')
+      end
+
+      it 'warns that the identifier was changed' do
+        identifier_for(options.merge(logger: logger))
+
+        expect(logger).to have_received(:warn).with(/not usable as a Kubernetes label value/)
+      end
     end
 
     it 'rejects namespaces that contain path separators' do
@@ -1514,6 +1579,32 @@ RSpec.describe Beaker::Kubevirt do
       end
     end
 
+    context 'with a VM name just under the DNS label limit' do
+      let(:vm_name) { "#{'a' * 56}-host1" }
+
+      before do
+        allow(hypervisor).to receive(:generate_vm_name).and_return(vm_name)
+      end
+
+      %w[http://example.com/fedora-disk.qcow2 my-pvc].each do |image|
+        it "keeps dv_name a valid DNS label, distinct per VM, for #{image}" do
+          options[:kubevirt_vm_image] = image
+          other_host = { 'name' => 'test-host-2', 'platform' => 'el-8-x86_64' }
+          def other_host.name
+            self['name']
+          end
+          allow(hypervisor).to receive(:generate_vm_name).and_return(vm_name, "#{'a' * 56}-host2")
+          hypervisor.send(:create_vm, host)
+          hypervisor.send(:create_vm, other_host)
+
+          names = [host['dv_name'], other_host['dv_name']]
+          expect(names).to all(match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/))
+          expect(names).to all(have_attributes(length: be <= 63))
+          expect(names.uniq.size).to eq(2)
+        end
+      end
+    end
+
     context 'with docker:// container image' do
       let(:vm_image) { 'docker://quay.io/kubevirt/fedora-cloud-container-disk-demo' }
 
@@ -1615,6 +1706,68 @@ RSpec.describe Beaker::Kubevirt do
         result = hypervisor.send(:generate_vm_name, host_obj)
         expect(result).to include('object-host')
       end
+    end
+
+    context 'with a maximum-length BEAKER_KUBEVIRT_TEST_GROUP' do
+      let(:env_value) { 'a' * 63 }
+
+      it 'gives each host a distinct name within the DNS label limit' do
+        names = %w[host1 host2].map { |n| hypervisor.send(:generate_vm_name, { 'name' => n }) }
+
+        expect(names.uniq.size).to eq(2)
+        expect(names).to all(have_attributes(length: be <= 63))
+        expect(names).to all(match(/\A[a-z][a-z0-9-]*[a-z0-9]\z/))
+      end
+    end
+  end
+
+  describe '#create_cloud_init_secret' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+
+    before { allow(kubevirt_helper).to receive(:create_secret) }
+
+    def secret_name_for(vm_name)
+      hypervisor.send(:create_cloud_init_secret, { 'name' => 'test-host', 'vm_name' => vm_name }, '#cloud-config')
+    end
+
+    it 'names the secret after the VM' do
+      expect(secret_name_for('beaker-abc123-test-host')).to eq('beaker-abc123-test-host-cloud-init')
+    end
+
+    it 'keeps the secret name a valid DNS label for a maximum-length VM name' do
+      names = [secret_name_for("#{'a' * 54}-11111111"), secret_name_for("#{'a' * 54}-22222222")]
+
+      expect(names.uniq.size).to eq(2)
+      expect(names).to all(match(/\A[a-z]([-a-z0-9]{0,61}[a-z0-9])?\z/))
+    end
+  end
+
+  describe '#setup_nodeport' do
+    let(:hypervisor) { described_class.new(hosts, options) }
+
+    before do
+      allow(kubevirt_helper).to receive_messages(
+        create_nodeport_service: { 'spec' => { 'ports' => [{ 'nodePort' => 30_022 }] } },
+        node_ip: '10.0.0.1',
+      )
+    end
+
+    def service_name_for(vm_name)
+      host = { 'vm_name' => vm_name }
+      hypervisor.send(:setup_nodeport, host)
+      host['service_name']
+    end
+
+    it 'names the service after the VM' do
+      expect(service_name_for('beaker-abc123-test-host')).to eq('beaker-abc123-test-host-ssh')
+    end
+
+    it 'keeps the service name within the DNS label limit for a maximum-length VM name' do
+      names = [service_name_for("#{'a' * 54}-11111111"), service_name_for("#{'a' * 54}-22222222")]
+
+      expect(names.uniq.size).to eq(2)
+      expect(names).to all(have_attributes(length: be <= 63))
+      expect(names).to all(match(/\A[a-z][a-z0-9-]*[a-z0-9]\z/))
     end
   end
 
