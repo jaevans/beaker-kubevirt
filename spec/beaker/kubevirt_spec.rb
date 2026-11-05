@@ -2275,15 +2275,35 @@ RSpec.describe Beaker::Kubevirt do
         expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'host' }))).to include('team' => 'host')
       end
 
+      it 'merges the host value over CONFIG, keeping CONFIG keys the host does not set' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'cost-centre' => '42', team: 'config' }))
+        expect(hypervisor.send(:user_labels, host.merge('kubevirt_labels' => { 'team' => 'host' }))).to eq('cost-centre' => '42', 'team' => 'host')
+      end
+
+      it 'merges a Beaker::Host value over CONFIG' do
+        global = Beaker::Options::OptionsHash.new.merge(options.merge(kubevirt_labels: { 'cost-centre' => '42' }))
+        hypervisor = described_class.new(hosts, global)
+        own = Beaker::Host.create('real-host', { 'platform' => 'el-8-x86_64', 'kubevirt_labels' => { 'team' => 'qa' } }, global)
+        inherited = Beaker::Host.create('other-host', { 'platform' => 'el-8-x86_64' }, global)
+        expect(hypervisor.send(:user_labels, own)).to eq('cost-centre' => '42', 'team' => 'qa')
+        expect(hypervisor.send(:user_labels, inherited)).to eq('cost-centre' => '42')
+      end
+
+      it 'raises ArgumentError when the CONFIG value is not a hash' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: 'team=infra'))
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'host' })) }
+          .to raise_error(ArgumentError, /kubevirt_labels must be a hash of keys to values, got "team=infra"/)
+      end
+
       it 'stringifies symbol keys and non-string values' do
         expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { ci: true }))).to include('ci' => 'true')
       end
 
-      it 'lets BEAKER_kubevirt_labels replace the host value' do
+      it 'lets BEAKER_kubevirt_labels replace the host and CONFIG values' do
         ENV['BEAKER_kubevirt_labels'] = 'team=env, site = west'
-        result = hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'other' => 'x' }))
-        expect(result).to include('team' => 'env', 'site' => 'west')
-        expect(result).not_to have_key('other')
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'cost-centre' => '42' }))
+        result = hypervisor.send(:user_labels, host.merge('kubevirt_labels' => { 'other' => 'x' }))
+        expect(result).to eq('team' => 'env', 'site' => 'west')
       end
 
       it 'raises ArgumentError for a key repeated in BEAKER_kubevirt_labels' do
@@ -2414,6 +2434,12 @@ RSpec.describe Beaker::Kubevirt do
     it 'falls back to the CONFIG value' do
       hypervisor = described_class.new(hosts, options.merge(kubevirt_annotations: evict))
       expect(hypervisor.send(:user_annotations, { 'name' => 'test-host' })).to eq(evict)
+    end
+
+    it 'merges the host value over CONFIG' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_annotations: evict.merge('example.com/note' => 'config')))
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note' => 'host' } }
+      expect(hypervisor.send(:user_annotations, host)).to eq(evict.merge('example.com/note' => 'host'))
     end
 
     it 'lets BEAKER_kubevirt_annotations replace the host value, keeping = in values' do
