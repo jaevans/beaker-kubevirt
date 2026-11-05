@@ -280,12 +280,14 @@ This matters when something outside the beaker process has to clean up after it.
 kubectl -n "$namespace" delete vm,dv,secret,svc -l "beaker/test-group=beaker-ci-${CI_JOB_ID}"
 ```
 
-The identifier must be unique to each run that can be live at the same time. It names the VMs, DataVolumes and Secrets as well as labelling them, so two runs that share it collide on create, and either run's cleanup deletes the other's resources. `CI_JOB_ID` is unique per job on GitLab. On GitHub Actions, `GITHUB_RUN_ID` is not: every job and matrix leg of a run shares it, and so do re-run attempts. Combine it with the attempt, the job and the matrix index, keeping the result within 63 characters (a longer value is refused rather than truncated, since truncation would cut off the part that tells runs apart):
+The identifier must be unique to each run, and to each hypervisor instance: with the variable set, use one `Beaker::Kubevirt` per process, since every instance in the process takes the same value. It names the VMs, DataVolumes and Secrets as well as labelling them, so two runs that share it collide on create, and either run's cleanup deletes the other's resources. `CI_JOB_ID` is unique per job on GitLab. On GitHub Actions, `GITHUB_RUN_ID` is not: every job and matrix leg of a run shares it, and so do re-run attempts. Combine it with the attempt, the job and the matrix index, keeping the result within 63 characters (a longer value is refused rather than truncated, since truncation would cut off the part that tells runs apart):
 
 ```yaml
 env:
   BEAKER_KUBEVIRT_TEST_GROUP: beaker-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
 ```
+
+Before creating anything, provisioning checks the namespace for VMs, DataVolumes, Secrets and Services already labelled `beaker/test-group=<identifier>`. If there are any, it stops with an error that lists them, and neither creates nor deletes anything, so resources a previous run kept with `BEAKER_destroy=no` or `onpass` survive. Delete them with the `kubectl` command above, or choose a value unique to this run. The check is skipped when the identifier is generated.
 
 The identifier is used both as the label value and as the prefix of resource names, so it is normalised to a DNS label: lowercase letters, digits and `-`, starting with a letter and ending with a letter or digit. A value that needs changing (for example `CI_1`, which becomes `ci-1`) is used in its normalised form and a warning is logged. Prefer a value that is already in that form, since an external cleanup has to select on the normalised label, not the string you set. `github.job` can contain uppercase letters and `_`, so apply the same normalisation when building the cleanup selector from it.
 
