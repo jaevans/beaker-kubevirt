@@ -195,6 +195,7 @@ RSpec.describe Beaker::Kubevirt do
     context 'when provisioning' do
       before do
         allow(hypervisor).to receive_messages(create_vm: true, wait_for_vm_ready: true, setup_networking: true, setup_port_forward: true)
+        allow(kubevirt_helper).to receive(:test_group_resources)
         hypervisor.provision
       end
 
@@ -208,6 +209,78 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'sets up networking' do
         expect(hypervisor).to have_received(:setup_networking).with(hosts[0])
+      end
+
+      it 'does not look for existing resources under a generated identifier' do
+        expect(kubevirt_helper).not_to have_received(:test_group_resources)
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is set and unused' do
+      let(:env_value) { 'ci-1' }
+
+      before do
+        allow(kubevirt_helper).to receive(:test_group_resources).with('ci-1').and_return({})
+        allow(hypervisor).to receive_messages(setup_networking: true)
+        hypervisor.provision
+      end
+
+      it 'creates the vm' do
+        expect(hypervisor).to have_received(:create_vm).with(hosts[0])
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP already labels resources' do
+      let(:env_value) { 'ci-1' }
+
+      before do
+        allow(kubevirt_helper).to receive(:test_group_resources).with('ci-1').and_return(
+          'VirtualMachine' => ['ci-1-test-host'],
+          'Secret' => ['ci-1-test-host-cloud-init'],
+        )
+        %i[cleanup_vms cleanup_data_volumes cleanup_secrets cleanup_services cleanup_temp_files].each do |m|
+          allow(kubevirt_helper).to receive(m)
+        end
+        allow(hypervisor).to receive(:cleanup).and_call_original
+      end
+
+      def provision_error
+        hypervisor.provision
+        nil
+      rescue RuntimeError => e
+        e
+      end
+
+      it 'raises naming the identifier, what was found, the causes and the fix' do
+        message = provision_error&.message
+
+        expect(message).to include('"ci-1"', 'beaker/test-group=ci-1')
+        expect(message).to include('VirtualMachine ci-1-test-host', 'Secret ci-1-test-host-cloud-init')
+        expect(message).to include('BEAKER_destroy=no', 'parallel job or matrix leg', 'second Beaker::Kubevirt instance')
+        expect(message).to include('kubectl -n beaker-test delete vm,dv,secret,svc -l beaker/test-group=ci-1')
+      end
+
+      it 'creates nothing' do
+        provision_error
+
+        expect(hypervisor).not_to have_received(:create_vm)
+      end
+
+      it 'does not call cleanup' do
+        provision_error
+
+        expect(hypervisor).not_to have_received(:cleanup)
+      end
+
+      it 'deletes nothing when cleanup or the at_exit handler runs afterwards' do
+        provision_error
+        hypervisor.cleanup
+        hypervisor.send(:cleanup_on_exit)
+
+        expect(kubevirt_helper).not_to have_received(:cleanup_vms)
+        expect(kubevirt_helper).not_to have_received(:cleanup_data_volumes)
+        expect(kubevirt_helper).not_to have_received(:cleanup_secrets)
+        expect(kubevirt_helper).not_to have_received(:cleanup_services)
       end
     end
   end

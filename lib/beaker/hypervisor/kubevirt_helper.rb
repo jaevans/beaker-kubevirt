@@ -108,8 +108,7 @@ module Beaker
       label_selector = "beaker/test-group=#{test_group_identifier}"
       @logger.debug("Using label selector: #{label_selector}")
 
-      vms = @kubevirt_client.get_virtual_machines(namespace: @namespace,
-                                                  label_selector: label_selector)
+      vms = list_vms(label_selector)
       @logger.info("Found #{vms.length} VM(s) with label beaker/test-group=#{test_group_identifier}")
 
       vms.each do |vm|
@@ -143,8 +142,7 @@ module Beaker
       label_selector = "beaker/test-group=#{test_group_identifier}"
       @logger.debug("Using label selector: #{label_selector}")
 
-      secrets = @k8s_client.get_secrets(namespace: @namespace,
-                                        label_selector: label_selector)
+      secrets = list_secrets(label_selector)
       @logger.info("Found #{secrets.length} secret(s) with label beaker/test-group=#{test_group_identifier}")
 
       secrets.each do |secret|
@@ -177,8 +175,7 @@ module Beaker
       label_selector = "beaker/test-group=#{test_group_identifier}"
       @logger.debug("Using label selector: #{label_selector}")
 
-      services = @k8s_client.get_services(namespace: @namespace,
-                                          label_selector: label_selector)
+      services = list_services(label_selector)
       @logger.info("Found #{services.length} service(s) with label beaker/test-group=#{test_group_identifier}")
 
       services.each do |service|
@@ -214,7 +211,7 @@ module Beaker
       label_selector = "beaker/test-group=#{test_group_identifier}"
 
       begin
-        dvs = @cdi_client.get_data_volumes(namespace: @namespace, label_selector: label_selector)
+        dvs = list_data_volumes(label_selector)
       rescue StandardError => e
         @logger.warn("Failed to list DataVolumes for cleanup: #{e.class}: #{e.message}")
         return
@@ -237,6 +234,35 @@ module Beaker
       rescue StandardError => e
         @logger.error("Error deleting DataVolume #{dv_name}: #{e.message}")
       end
+    end
+
+    ##
+    # Names of the resources in the namespace that carry
+    # beaker/test-group=<test_group_identifier>, by kind. Kinds with none are
+    # left out, so an empty hash means the identifier is unused.
+    #
+    # DataVolumes are not listed when CDI is unavailable, and a failure to
+    # list them is logged and treated as none, as cleanup_data_volumes does.
+    # Any other listing error is raised.
+    # @param [String] test_group_identifier The identifier for the test group
+    # @return [Hash{String => Array<String>}] resource names keyed by kind
+    def test_group_resources(test_group_identifier)
+      label_selector = "beaker/test-group=#{test_group_identifier}"
+      data_volumes = begin
+        @cdi_client ? list_data_volumes(label_selector) : []
+      rescue StandardError => e
+        @logger.warn("Failed to list DataVolumes for #{label_selector}: #{e.class}: #{e.message}")
+        []
+      end
+
+      found = {
+        'VirtualMachine' => list_vms(label_selector),
+        'DataVolume' => data_volumes,
+        'Secret' => list_secrets(label_selector),
+        'Service' => list_services(label_selector),
+      }
+      found.reject { |_, items| items.empty? }
+           .transform_values { |items| items.map { |item| resource_name(item) || '<unnamed>' } }
     end
 
     ##
@@ -352,6 +378,27 @@ module Beaker
     end
 
     private
+
+    def list_vms(label_selector)
+      @kubevirt_client.get_virtual_machines(namespace: @namespace, label_selector: label_selector)
+    end
+
+    def list_secrets(label_selector)
+      @k8s_client.get_secrets(namespace: @namespace, label_selector: label_selector)
+    end
+
+    def list_services(label_selector)
+      @k8s_client.get_services(namespace: @namespace, label_selector: label_selector)
+    end
+
+    def list_data_volumes(label_selector)
+      @cdi_client.get_data_volumes(namespace: @namespace, label_selector: label_selector)
+    end
+
+    def resource_name(resource)
+      metadata = resource[:metadata] || resource['metadata']
+      metadata && (metadata[:name] || metadata['name'])
+    end
 
     ##
     # Setup Kubernetes API client

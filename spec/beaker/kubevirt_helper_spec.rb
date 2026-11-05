@@ -242,6 +242,62 @@ RSpec.describe Beaker::KubevirtHelper do
     end
   end
 
+  describe '#test_group_resources' do
+    let(:k8s_client) { double('k8s_client', get_secrets: [], get_services: []) }
+    let(:kubevirt_client) { double('kubevirt_client', get_virtual_machines: []) }
+    let(:cdi_client) { double('cdi_client', get_data_volumes: []) }
+    let(:helper) { described_class.new(options.merge(k8s_client: k8s_client, kubevirt_client: kubevirt_client, cdi_client: cdi_client)) }
+
+    def named(name)
+      { metadata: { name: name } }
+    end
+
+    it 'is empty when nothing carries the label' do
+      expect(helper.test_group_resources('ci-1')).to eq({})
+    end
+
+    it 'lists each kind by the test-group label in the namespace' do
+      helper.test_group_resources('ci-1')
+
+      selector = { namespace: 'test-namespace', label_selector: 'beaker/test-group=ci-1' }
+      expect(kubevirt_client).to have_received(:get_virtual_machines).with(selector)
+      expect(cdi_client).to have_received(:get_data_volumes).with(selector)
+      expect(k8s_client).to have_received(:get_secrets).with(selector)
+      expect(k8s_client).to have_received(:get_services).with(selector)
+    end
+
+    it 'returns the names found, by kind' do
+      allow(kubevirt_client).to receive(:get_virtual_machines).and_return([named('ci-1-host')])
+      allow(cdi_client).to receive(:get_data_volumes).and_return([named('ci-1-host-dv')])
+      allow(k8s_client).to receive(:get_secrets).and_return([named('ci-1-host-cloud-init'), { 'metadata' => {} }])
+
+      expect(helper.test_group_resources('ci-1')).to eq(
+        'VirtualMachine' => ['ci-1-host'],
+        'DataVolume' => ['ci-1-host-dv'],
+        'Secret' => ['ci-1-host-cloud-init', '<unnamed>'],
+      )
+    end
+
+    it 'skips DataVolumes when CDI is unavailable' do
+      helper.instance_variable_set(:@cdi_client, nil)
+
+      expect(helper.test_group_resources('ci-1')).to eq({})
+    end
+
+    it 'treats a DataVolume listing failure as none' do
+      allow(cdi_client).to receive(:get_data_volumes).and_raise(StandardError, 'forbidden')
+      allow(kubevirt_client).to receive(:get_virtual_machines).and_return([named('ci-1-host')])
+
+      expect(helper.test_group_resources('ci-1')).to eq('VirtualMachine' => ['ci-1-host'])
+    end
+
+    it 'raises when listing VMs fails' do
+      allow(kubevirt_client).to receive(:get_virtual_machines).and_raise(StandardError, 'forbidden')
+
+      expect { helper.test_group_resources('ci-1') }.to raise_error(StandardError, 'forbidden')
+    end
+  end
+
   describe 'manual kubeconfig parsing fallback' do
     let(:clients) do
       {

@@ -177,7 +177,9 @@ module Beaker
       @hosts = kubevirt_hosts
       # Ensure the helper gets the validated namespace
       @kubevirt_helper = KubevirtHelper.new(@options)
-      @test_group_identifier = configured_test_group_identifier || "beaker-#{SecureRandom.hex(4)}"
+      configured = configured_test_group_identifier
+      @test_group_identifier_configured = !configured.nil?
+      @test_group_identifier = configured || "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
       # "<pod_name>/<container>" => monotonic timestamp the container was first
@@ -192,7 +194,8 @@ module Beaker
       # This handles cases like Ctrl+C, errors, or test failures that occur after
       # provisioning but before normal cleanup
       # Note: Each instance registers its own at_exit handler, but cleanup is idempotent
-      # and scoped to the specific test_group_identifier for this instance
+      # and scoped to this instance's test_group_identifier, which is shared by
+      # every instance in the process when BEAKER_KUBEVIRT_TEST_GROUP is set
       # Skip registration during this gem's own rspec run (set by spec_helper).
       # Gating on `defined?(RSpec)` misfired in downstream projects that run
       # Beaker from inside their own rspec suite, suppressing the safety net
@@ -209,6 +212,7 @@ module Beaker
     def provision
       # rubocop:disable Style/CombinableLoops
       @logger.info("Starting KubeVirt provisioning with identifier: #{@test_group_identifier}")
+      ensure_test_group_unused!
 
       @hosts.each do |host|
         create_vm(host)
@@ -333,6 +337,34 @@ module Beaker
         @logger.error("Error during at_exit cleanup: #{e.message}")
         @logger.debug(e.backtrace.join("\n"))
       end
+    end
+
+    ##
+    # Refuse to provision under a BEAKER_KUBEVIRT_TEST_GROUP that already
+    # labels resources in the namespace.
+    #
+    # Those resources belong to another run, or to an earlier run that was
+    # kept. Creating under the same names fails with AlreadyExists, and the
+    # cleanup that follows a failed provision, or runs at exit, deletes by
+    # this label, so it would destroy them. Marking cleanup as already done
+    # before raising keeps cleanup, cleanup_on_exit and Beaker's own cleanup
+    # from touching them. A random identifier is not checked.
+    # @raise [RuntimeError] if any VM, DataVolume, Secret or Service carries the label
+    def ensure_test_group_unused!
+      return unless @test_group_identifier_configured
+
+      found = @kubevirt_helper.test_group_resources(@test_group_identifier)
+      return if found.empty?
+
+      @cleanup_mutex.synchronize { @cleanup_called = true }
+      label = "beaker/test-group=#{@test_group_identifier}"
+      raise "BEAKER_KUBEVIRT_TEST_GROUP is #{@test_group_identifier.inspect}, but namespace #{@namespace} " \
+            "already has resources labelled #{label}: " \
+            "#{found.map { |kind, names| "#{kind} #{names.join(', ')}" }.join('; ')}. " \
+            'Likely causes: a previous run kept with BEAKER_destroy=no or onpass, a parallel job or matrix ' \
+            'leg using the same value, or a second Beaker::Kubevirt instance in this process. ' \
+            "Delete them (kubectl -n #{@namespace} delete vm,dv,secret,svc -l #{label}) " \
+            'or set BEAKER_KUBEVIRT_TEST_GROUP to a value unique to this run. Nothing was created or deleted.'
     end
 
     ##
