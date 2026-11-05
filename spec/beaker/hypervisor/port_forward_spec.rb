@@ -313,6 +313,20 @@ RSpec.describe KubeVirtPortForwarder do
         expect(captured).to be_a(RuntimeError)
         expect(captured.message).to include('reactor did not become ready within')
       end
+
+      it 'measures the startup deadline with the shared monotonic clock' do
+        described_class.reactor_owner = forwarder
+        @reactor_running = false
+        allow(forwarder2).to receive(:monotonic_time).and_return(0, described_class::REACTOR_STARTUP_TIMEOUT + 1)
+
+        captured = nil
+        forwarder2.instance_variable_set(:@on_error, ->(e) { captured = e })
+
+        forwarder2.start
+
+        expect(captured.message).to include('reactor did not become ready within')
+        expect(forwarder2).to have_received(:monotonic_time).twice
+      end
     end
   end
 

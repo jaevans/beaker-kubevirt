@@ -1045,6 +1045,116 @@ RSpec.describe Beaker::Kubevirt do
         hypervisor.send(:wait_for_vm_ready, host)
       end
     end
+
+    describe 'when the ready timeout fires inside a grace window' do
+      def pending_vmi
+        { 'status' => { 'phase' => 'Pending' } }
+      end
+
+      def running_vmi
+        { 'status' => { 'phase' => 'Running', 'conditions' => [ready_true] } }
+      end
+
+      def pull_message
+        'Back-off pulling image "registry.example.com/windows-2016:latest": EOF'
+      end
+
+      def scheduler_message
+        '0/8 nodes are available: 5 Insufficient cpu.'
+      end
+
+      def backoff_pod
+        {
+          'metadata' => { 'name' => 'virt-launcher-test-vm-aaaaa' },
+          'status' => {
+            'phase' => 'Pending',
+            'initContainerStatuses' => [
+              { 'name' => 'volumerootdisk-init',
+                'state' => { 'waiting' => { 'reason' => 'ImagePullBackOff', 'message' => pull_message } }, },
+            ],
+          },
+        }
+      end
+
+      def unschedulable_pod
+        {
+          'metadata' => { 'uid' => 'pod-uid-1' },
+          'status' => {
+            'phase' => 'Pending',
+            'conditions' => [
+              { 'type' => 'PodScheduled', 'status' => 'False', 'reason' => 'Unschedulable', 'message' => scheduler_message },
+            ],
+          },
+        }
+      end
+
+      # Raising from the next poll stands in for the outer timer expiring between
+      # polls, so the elapsed time the error reports can be pinned exactly.
+      def expire_on_second_poll(pod)
+        polls = 0
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod) do
+          polls += 1
+          raise Timeout::Error, 'execution expired' if polls > 1
+
+          pod
+        end
+      end
+
+      it 'names the image pull backoff, its elapsed time and the kubelet message' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi)
+        expire_on_second_poll(backoff_pod)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 312)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(
+          Timeout::Error,
+          'Timeout waiting for VM test-vm to be ready: virt-launcher container volumerootdisk-init ' \
+          "is ImagePullBackOff after 312s: #{pull_message}",
+        )
+        expect(options[:logger]).to have_received(:error).with(/\ATimeout waiting for VM test-vm to be ready: .*after 312s/)
+      end
+
+      it 'names the unschedulable reason, its elapsed time and the scheduler message' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi)
+        expire_on_second_poll(unschedulable_pod)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 0, 250)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(
+          Timeout::Error,
+          "Timeout waiting for VM test-vm to be ready: virt-launcher pod is Unschedulable after 250s: #{scheduler_message}",
+        )
+      end
+
+      it 'reports the cause when the real timer expires before the grace window' do
+        hypervisor = described_class.new(hosts, options.merge(timeout: 1))
+        host['kubevirt_readiness_probe_disabled'] = true
+        allow(kubevirt_helper).to receive_messages(get_vmi: pending_vmi, get_virt_launcher_pod: backoff_pod)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(
+          Timeout::Error, /\ATimeout waiting for VM test-vm to be ready: .*ImagePullBackOff after \d+s: .*EOF\z/
+        )
+      end
+
+      it 'keeps the bare message when nothing is pending' do
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi)
+        expire_on_second_poll(nil)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }
+          .to raise_error(Timeout::Error, 'Timeout waiting for VM test-vm to be ready')
+      end
+
+      it 'does not carry an unschedulable window into the next wait' do
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(unschedulable_pod)
+        allow(kubevirt_helper).to receive(:get_vmi).and_return(pending_vmi, running_vmi, pending_vmi, running_vmi)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 0, 400, 400)
+        2.times { hypervisor.send(:wait_for_vm_ready, host) }
+        expect(options[:logger]).to have_received(:warn).with(/is Unschedulable, allowing 300s/).twice
+      end
+
+      it 'does not carry an image pull window past a wait that failed' do
+        allow(kubevirt_helper).to receive(:get_virt_launcher_pod).and_return(backoff_pod)
+        allow(kubevirt_helper).to receive(:get_vmi)
+          .and_return(pending_vmi, { 'status' => { 'phase' => 'Failed' } }, pending_vmi, running_vmi)
+        allow(hypervisor).to receive(:monotonic_time).and_return(0, 700)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.to raise_error(/terminal phase Failed/)
+        expect { hypervisor.send(:wait_for_vm_ready, host) }.not_to raise_error
+      end
+    end
   end
 
   describe '#generate_cloud_init' do

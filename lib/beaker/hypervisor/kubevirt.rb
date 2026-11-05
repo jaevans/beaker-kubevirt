@@ -6,6 +6,7 @@ require 'yaml'
 require 'base64'
 require 'socket'
 require 'tempfile'
+require 'beaker/kubevirt/monotonic_clock'
 
 begin
   require 'beaker'
@@ -36,6 +37,8 @@ end
 module Beaker
   # Beaker support for KubeVirt virtualization platform
   class Kubevirt < Beaker::Hypervisor
+    include BeakerKubevirt::MonotonicClock
+
     SLEEPWAIT = 5
     SSH_TIMEOUT = 300
 
@@ -180,13 +183,7 @@ module Beaker
       @test_group_identifier = configured_test_group_identifier || "beaker-#{SecureRandom.hex(4)}"
       @cleanup_called = false
       @cleanup_mutex = Mutex.new
-      # "<pod_name>/<container>" => monotonic timestamp the container was first
-      # seen backing off an image pull. Cleared once it is running or terminated.
-      @image_pull_backoff_since = {}
-      # vm_name => { uid:, since: } — the virt-launcher pod's UID and the monotonic
-      # timestamp it was first seen unschedulable. Cleared as soon as the scheduler
-      # places it; restarted when a pod with a different UID replaces it.
-      @unschedulable_since = {}
+      reset_pending_trackers
 
       # Register at_exit handler to ensure cleanup happens even on non-success exits
       # This handles cases like Ctrl+C, errors, or test failures that occur after
@@ -1116,6 +1113,7 @@ module Beaker
 
       probe = generate_readiness_probe_spec(host)
       timeout = effective_ready_timeout(probe)
+      reset_pending_trackers
 
       begin
         Timeout.timeout(timeout) do
@@ -1151,10 +1149,45 @@ module Beaker
             sleep SLEEPWAIT
           end
         end
-      rescue Timeout::Error
-        @logger.error("Timeout waiting for VM #{vm_name} to be ready")
-        raise
+      rescue Timeout::Error => e
+        message = "Timeout waiting for VM #{vm_name} to be ready"
+        causes = pending_causes(vm_name)
+        message += ": #{causes.join('; ')}" unless causes.empty?
+        @logger.error(message)
+        raise Timeout::Error, message, e.backtrace
+      ensure
+        reset_pending_trackers
       end
+    end
+
+    ##
+    # Start every grace-window tracker empty. Called at both ends of
+    # wait_for_vm_ready so that an entry never outlives the wait that wrote it.
+    def reset_pending_trackers
+      # "<pod_name>/<container>" => { since:, container:, reason:, message: } for a
+      # container seen backing off an image pull. Cleared once it runs or terminates.
+      @image_pull_backoff_since = {}
+      # vm_name => { uid:, since:, reason:, message: } for a virt-launcher pod seen
+      # unschedulable. Cleared as soon as the scheduler places it; restarted when a
+      # pod with a different UID replaces it.
+      @unschedulable_since = {}
+    end
+
+    ##
+    # Describe each grace window still open for a VM, so a ready timeout that fires
+    # inside one names the cause instead of leaving it in an earlier warning.
+    # @param [String] vm_name
+    # @return [Array<String>] one description per open window: scheduling first, then each image pull in the order first seen
+    def pending_causes(vm_name)
+      now = monotonic_time
+      causes = []
+      tracked = @unschedulable_since[vm_name]
+      causes << "virt-launcher pod is #{tracked[:reason]} after #{(now - tracked[:since]).round}s: #{tracked[:message]}" if tracked
+      @image_pull_backoff_since.each_value do |entry|
+        causes << "virt-launcher container #{entry[:container]} is #{entry[:reason]} after " \
+                  "#{(now - entry[:since]).round}s: #{entry[:message]}"
+      end
+      causes
     end
 
     ##
@@ -1276,8 +1309,10 @@ module Beaker
       key = "#{pod_name}/#{container}"
       now = monotonic_time
       first_seen = !@image_pull_backoff_since.key?(key)
-      @image_pull_backoff_since[key] ||= now
-      elapsed = (now - @image_pull_backoff_since[key]).round
+      entry = (@image_pull_backoff_since[key] ||= { since: now, container: container })
+      entry[:reason] = reason
+      entry[:message] = message
+      elapsed = (now - entry[:since]).round
 
       if elapsed > grace
         raise "virt-launcher container #{container} for #{vm_name} is still #{reason} after #{elapsed}s, " \
@@ -1352,6 +1387,8 @@ module Beaker
         @logger.warn("virt-launcher pod for #{vm_name} is #{reason}, allowing #{grace}s " \
                      "for capacity: #{message}")
       end
+      tracked[:reason] = reason
+      tracked[:message] = message
 
       waited = monotonic_time - tracked[:since]
       return if waited < grace
@@ -1371,14 +1408,6 @@ module Beaker
       raise ArgumentError, "kubevirt_unschedulable_grace must be a whole number of seconds, got #{value.inspect}" if grace.nil? || grace.negative?
 
       grace
-    end
-
-    ##
-    # Monotonic seconds, so a wall-clock adjustment mid-wait cannot shorten or
-    # extend a grace window.
-    # @return [Float]
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     ##

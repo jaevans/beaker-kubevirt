@@ -7,6 +7,7 @@ require 'socket'
 require 'logger'
 require 'json'
 require 'uri'
+require 'beaker/kubevirt/monotonic_clock'
 
 # KubeVirtPortForwarder acts as a local TCP proxy for a port on a KubeVirt VMI.
 # It handles the entire lifecycle of discovering the VMI, establishing a
@@ -20,6 +21,8 @@ require 'uri'
 # See the bottom of this file for a complete usage example.
 #
 class KubeVirtPortForwarder
+  include BeakerKubevirt::MonotonicClock
+
   attr_reader :state, :local_port
 
   # The subprotocol required by the Kubernetes API for multiplexed streaming.
@@ -268,7 +271,7 @@ class KubeVirtPortForwarder
   # Block until EventMachine.reactor_running? becomes true, or fail fast
   # if the reactor thread died during startup or the deadline elapses.
   def wait_for_reactor_ready
-    deadline = monotonic_now + REACTOR_STARTUP_TIMEOUT
+    deadline = monotonic_time + REACTOR_STARTUP_TIMEOUT
     until EventMachine.reactor_running?
       unless @reactor_thread.alive?
         begin
@@ -286,7 +289,7 @@ class KubeVirtPortForwarder
         end
         raise 'EventMachine reactor thread exited during startup with no exception'
       end
-      raise "EventMachine reactor did not become ready within #{REACTOR_STARTUP_TIMEOUT}s" if (monotonic_now > deadline) && !EventMachine.reactor_running?
+      raise "EventMachine reactor did not become ready within #{REACTOR_STARTUP_TIMEOUT}s" if (monotonic_time > deadline) && !EventMachine.reactor_running?
 
       sleep 0.1
     end
@@ -297,20 +300,13 @@ class KubeVirtPortForwarder
   # its rescue/stop path; if that happens before the reactor came up, we bail
   # out rather than wait the full deadline.
   def wait_for_existing_reactor_ready
-    deadline = monotonic_now + REACTOR_STARTUP_TIMEOUT
+    deadline = monotonic_time + REACTOR_STARTUP_TIMEOUT
     until EventMachine.reactor_running?
       raise 'EventMachine reactor owner cleared before reactor became ready' if self.class.reactor_owner.nil?
-      raise "EventMachine reactor did not become ready within #{REACTOR_STARTUP_TIMEOUT}s" if (monotonic_now > deadline) && !EventMachine.reactor_running?
+      raise "EventMachine reactor did not become ready within #{REACTOR_STARTUP_TIMEOUT}s" if (monotonic_time > deadline) && !EventMachine.reactor_running?
 
       sleep 0.1
     end
-  end
-
-  # Monotonic clock for deadline arithmetic. Time.now is wall-clock and can
-  # jump forwards/backwards on NTP adjustments, producing spurious timeouts
-  # or longer-than-expected waits.
-  def monotonic_now
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
   # Handles a single client connection from start to finish.
