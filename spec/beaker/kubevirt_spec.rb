@@ -34,6 +34,18 @@ RSpec.describe Beaker::Kubevirt do
     ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
   end
 
+  # BEAKER_kubevirt_* variables override host and CONFIG settings. Clear every
+  # one for each example so a value exported in the developer's environment
+  # cannot change the results, and restore them afterwards.
+  around do |example|
+    saved = ENV.to_h.select { |name, _| name.start_with?('BEAKER_kubevirt_') }
+    saved.each_key { |name| ENV.delete(name) }
+    example.run
+  ensure
+    ENV.each_key.select { |name| name.start_with?('BEAKER_kubevirt_') }.each { |name| ENV.delete(name) }
+    saved&.each { |name, value| ENV[name] = value }
+  end
+
   before do
     allow(Beaker::KubevirtHelper).to receive(:new).and_return(kubevirt_helper)
     allow(kubevirt_helper).to receive(:namespace).and_return('beaker-test')
@@ -419,6 +431,50 @@ RSpec.describe Beaker::Kubevirt do
       it 'respects an overridden kubevirt_memory_request' do
         options[:kubevirt_memory_request] = '2Gi'
         expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'memory')).to eq('2Gi')
+      end
+
+      it 'omits the cpu request by default' do
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests')).not_to have_key('cpu')
+      end
+
+      it 'omits the cpu limit by default' do
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits')).not_to have_key('cpu')
+      end
+
+      it 'respects an overridden kubevirt_cpu_request' do
+        options[:kubevirt_cpu_request] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'respects a per-host kubevirt_cpu_request' do
+        hosts[0]['kubevirt_cpu_request'] = '1500m'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('1500m')
+      end
+
+      it 'respects an overridden kubevirt_cpu_limit' do
+        options[:kubevirt_cpu_limit] = '4'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits', 'cpu')).to eq('4')
+      end
+
+      it 'respects a per-host kubevirt_cpu_limit' do
+        hosts[0]['kubevirt_cpu_limit'] = '3500m'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'limits', 'cpu')).to eq('3500m')
+      end
+
+      it 'stringifies a numeric cpu request' do
+        options[:kubevirt_cpu_request] = 2
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'prefers the per-host cpu request over the global option' do
+        options[:kubevirt_cpu_request] = '1'
+        hosts[0]['kubevirt_cpu_request'] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'cpu')).to eq('2')
+      end
+
+      it 'leaves the memory request untouched when only cpu is set' do
+        options[:kubevirt_cpu_request] = '2'
+        expect(vm_spec.dig('spec', 'template', 'spec', 'domain', 'resources', 'requests', 'memory')).to eq('4Gi')
       end
     end
 
@@ -1886,6 +1942,55 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'raises ArgumentError' do
         expect { hypervisor.send(:disk_cache, host) }.to raise_error(ArgumentError, /kubevirt_disk_cache must be one of none, writethrough, writeback/)
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is set' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = ' writeback '
+      end
+
+      it 'is used when nothing else is set' do
+        expect(described_class.new(hosts, options).send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
+      end
+
+      it 'overrides the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' })).to eq('writeback')
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is invalid' do
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = 'unsafe'
+      end
+
+      it 'raises ArgumentError naming the variable' do
+        expect { hypervisor.send(:disk_cache, { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' }) }
+          .to raise_error(ArgumentError, /\ABEAKER_kubevirt_disk_cache must be one of none, writethrough, writeback, got "unsafe"/)
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is upper case' do
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = 'WriteBack'
+      end
+
+      it 'is folded to lower case' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host' })).to eq('writeback')
+      end
+    end
+
+    context 'when BEAKER_kubevirt_disk_cache is blank' do
+      let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+      before do
+        ENV['BEAKER_kubevirt_disk_cache'] = '  '
+      end
+
+      it 'falls through to the host and CONFIG values' do
+        expect(hypervisor.send(:disk_cache, { 'name' => 'test-host' })).to eq('writethrough')
       end
     end
   end

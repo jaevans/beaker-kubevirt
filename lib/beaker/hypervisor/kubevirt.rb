@@ -76,6 +76,12 @@ module Beaker
     # @option options [String] :kubevirt_network_mode Network mode (port-forward, nodeport, multus)
     # @option options [String] :kubevirt_ssh_key SSH public key to inject
     # @option options [String] :kubevirt_cpus CPU resources for VM
+    # @option options [String] :kubevirt_cpu_request CPU request for the VM pod, as a Kubernetes
+    #   CPU quantity ('2', '1500m'). Unset by default, which leaves KubeVirt to derive the request
+    #   from the guest core count divided by the cluster's cpuAllocationRatio (default 10). Set it
+    #   for guests that must not be throttled while booting -- Windows especially.
+    # @option options [String] :kubevirt_cpu_limit CPU limit for the VM pod, as a Kubernetes CPU
+    #   quantity. Unset by default, which leaves the compute container burstable.
     # @option options [String] :kubevirt_memory Memory resources for VM
     # @option options [String] :kubevirt_memory_overhead Extra memory added to guest for the
     #   container memory limit (default: '512Mi'). Needed for Windows guests where KubeVirt's
@@ -541,7 +547,20 @@ module Beaker
     end
 
     ##
-    # Cache mode for the root disk, from the host or the global CONFIG.
+    # The value of the BEAKER_<name> environment variable, which overrides the
+    # host and CONFIG settings of the option it names so that a CI environment
+    # can set it for every nodeset it runs, as beaker-google's BEAKER_gce_*
+    # variables do.
+    # @param [String] name The option name, e.g. 'kubevirt_disk_cache'
+    # @return [String, nil] The stripped value, or nil when unset or blank
+    def env_option(name)
+      value = ENV.fetch("BEAKER_#{name}", nil)&.strip
+      value unless value.nil? || value.empty?
+    end
+
+    ##
+    # Cache mode for the root disk, from BEAKER_kubevirt_disk_cache, the host
+    # or the global CONFIG, in that order.
     # Unset leaves the choice to KubeVirt, which uses none when the backing
     # store supports O_DIRECT and writethrough otherwise. writeback lets the
     # virt-launcher's page cache absorb guest writes until the guest flushes,
@@ -549,11 +568,15 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
     def disk_cache(host)
-      cache = host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
-      return nil if cache.nil? || cache.to_s.empty?
+      env = env_option('kubevirt_disk_cache')
+      value = env || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      return nil if value.nil? || value.to_s.empty?
 
-      cache = cache.to_s
-      raise ArgumentError, "kubevirt_disk_cache must be one of #{DISK_CACHE_MODES.join(', ')}, got #{cache.inspect}" unless DISK_CACHE_MODES.include?(cache)
+      cache = value.to_s.downcase
+      unless DISK_CACHE_MODES.include?(cache)
+        source = env ? 'BEAKER_kubevirt_disk_cache' : 'kubevirt_disk_cache'
+        raise ArgumentError, "#{source} must be one of #{DISK_CACHE_MODES.join(', ')}, got #{value.to_s.inspect}"
+      end
 
       cache
     end
@@ -615,6 +638,15 @@ module Beaker
       memory_request = "#{memory_request}Mi" if /\A\d+\z/.match?(memory_request.to_s)
       memory_limit = "#{parse_memory_mib(memory) + parse_memory_mib(overhead)}Mi"
 
+      # Both unset by default: KubeVirt then derives the pod's CPU request from the guest core
+      # count divided by the cluster's cpuAllocationRatio, and sets no limit at all.
+      cpu_request = host['kubevirt_cpu_request'] || @options[:kubevirt_cpu_request]
+      cpu_limit = host['kubevirt_cpu_limit'] || @options[:kubevirt_cpu_limit]
+      resource_requests = { 'memory' => memory_request }
+      resource_requests['cpu'] = cpu_request.to_s if cpu_request
+      resource_limits = { 'memory' => memory_limit }
+      resource_limits['cpu'] = cpu_limit.to_s if cpu_limit
+
       vm_image = host['kubevirt_vm_image'] || @options[:kubevirt_vm_image]
       host_name = host.respond_to?(:name) ? host.name : host['name']
 
@@ -652,8 +684,8 @@ module Beaker
                   'guest' => memory.to_s,
                 },
                 'resources' => {
-                  'requests' => { 'memory' => memory_request },
-                  'limits' => { 'memory' => memory_limit },
+                  'requests' => resource_requests,
+                  'limits' => resource_limits,
                 },
                 'devices' => generate_hardware_spec(host),
                 'features' => {
