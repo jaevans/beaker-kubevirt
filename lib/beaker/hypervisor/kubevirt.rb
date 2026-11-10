@@ -89,10 +89,18 @@ module Beaker
     # bare "denied" would catch `connect: permission denied` from a network flap,
     # both of which are what the window is for. containerd reports a missing tag
     # as `failed to resolve reference "<ref>": <ref>: not found`; resolving is
-    # the tag/manifest lookup, never a blob fetch.
+    # the tag/manifest lookup, never a blob fetch. A missing repository is
+    # matched on Docker Hub's and distribution's (NAME_UNKNOWN) own phrasing.
+    #
+    # Not matched, on purpose: zot as an on-demand mirror answers a missing tag
+    # or repo with a body-less `503 Service Unavailable` to containerd's HEAD,
+    # the same status it gives for an upstream outage, so through zot a typo
+    # waits out the grace window.
     DEFINITIVE_IMAGE_PULL_FAILURE_RE = Regexp.union(
       /manifest unknown/i,
       /failed to resolve reference .*: not found/i,
+      /repository does not exist/i,
+      /repository name not known to registry/i,
       /pull access denied/i,
       /requested access to the resource is denied/i,
       /unauthorized: authentication required/i,
