@@ -131,8 +131,46 @@ RSpec.describe Beaker::Kubevirt do
     context 'when BEAKER_KUBEVIRT_TEST_GROUP starts with a digit' do
       let(:env_value) { '12345' }
 
-      it 'prefixes a letter so it is a valid DNS label' do
-        expect(identifier_for).to eq('x12345')
+      it 'keeps the leading digit in the identifier' do
+        expect(identifier_for).to eq('12345')
+      end
+
+      it 'labels with the value as given, as a string' do
+        label = hypervisor.send(:get_labels, { 'name' => 'test-host' })['beaker/test-group']
+
+        expect(label).to eq('12345').and be_a(String)
+      end
+
+      it 'does not warn' do
+        identifier_for
+
+        expect(options[:logger]).not_to have_received(:warn)
+      end
+
+      it 'prefixes a letter only on the derived resource name' do
+        expect(hypervisor.send(:generate_vm_name, { 'name' => 'test-host' })).to eq('x12345-test-host')
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP is 63 digits' do
+      let(:env_value) { '9' * 63 }
+
+      it 'keeps the full value as the label' do
+        expect(hypervisor.send(:get_labels, { 'name' => 'h' })['beaker/test-group']).to eq(env_value)
+      end
+
+      it 'bounds the derived VM name to a DNS label' do
+        expect(hypervisor.send(:generate_vm_name, { 'name' => 'h' }))
+          .to match(/\Ax9+-[0-9a-f]{8}\z/).and(have_attributes(length: 63))
+      end
+    end
+
+    context 'when BEAKER_KUBEVIRT_TEST_GROUP has no letters or digits' do
+      let(:env_value) { '_-.' }
+
+      it 'raises instead of inventing an identifier' do
+        expect { described_class.new(hosts, options) }
+          .to raise_error(ArgumentError, /must contain a letter or digit/)
       end
     end
 
@@ -150,7 +188,7 @@ RSpec.describe Beaker::Kubevirt do
 
       it 'strips it and warns that the identifier was changed' do
         expect(identifier_for(options.merge(logger: logger))).to eq('beaker-ci-123')
-        expect(logger).to have_received(:warn).with(/not a valid DNS label/)
+        expect(logger).to have_received(:warn).with(/not in normalised form/)
       end
     end
 
@@ -165,7 +203,7 @@ RSpec.describe Beaker::Kubevirt do
       it 'warns that the identifier was changed' do
         identifier_for(options.merge(logger: logger))
 
-        expect(logger).to have_received(:warn).with(/not a valid DNS label/)
+        expect(logger).to have_received(:warn).with(/not in normalised form/)
       end
     end
 

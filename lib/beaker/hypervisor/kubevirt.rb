@@ -564,13 +564,18 @@ module Beaker
     # Deleting by `beaker/test-group=<the identifier it chose>` cleans up that
     # run without touching other runs sharing the namespace.
     #
-    # The value is normalised once to a DNS label and used for both the
-    # beaker/test-group label and the resource names derived from it. Label
-    # values allow case, '_' and '.', names do not, so normalising them
+    # The value is normalised once to lowercase [a-z0-9-] and used for both
+    # the beaker/test-group label and the resource names derived from it.
+    # Label values allow case, '_' and '.', names do not, so normalising them
     # separately let `CI_1` and `ci-1` select on different labels while
     # creating the same names.
     #
+    # A leading digit is kept: label values allow it, and a bare CI job ID
+    # must select on the label exactly as given. Only the derived names need
+    # a leading letter, which sanitize_k8s_name adds when building them.
+    #
     # @return [String, nil] the normalised identifier, or nil when unset or blank
+    # @raise [ArgumentError] if the value is too long or has no letters or digits
     def configured_test_group_identifier
       raw = ENV.fetch('BEAKER_KUBEVIRT_TEST_GROUP', '')
       return nil if raw.strip.empty?
@@ -582,11 +587,13 @@ module Beaker
                              "got #{raw.strip.length}: #{raw.inspect}"
       end
 
-      identifier = sanitize_k8s_name(raw.strip.gsub(/\A[^A-Za-z0-9]+|[^A-Za-z0-9]+\z/, ''))
+      identifier = raw.strip.downcase.gsub(/[^a-z0-9-]/, '-').gsub(/\A-+|-+\z/, '')
+      raise ArgumentError, "BEAKER_KUBEVIRT_TEST_GROUP must contain a letter or digit, got #{raw.inspect}" if identifier.empty?
+
       if identifier != raw
         @logger.warn(
-          "BEAKER_KUBEVIRT_TEST_GROUP #{raw.inspect} is not a valid DNS label (lowercase letters, " \
-          "digits and '-', starting with a letter); using #{identifier.inspect} instead",
+          "BEAKER_KUBEVIRT_TEST_GROUP #{raw.inspect} is not in normalised form (lowercase letters, " \
+          "digits and '-', starting and ending with a letter or digit); using #{identifier.inspect} instead",
         )
       end
       identifier
