@@ -34,15 +34,21 @@ RSpec.describe Beaker::Kubevirt do
     ENV['BEAKER_KUBEVIRT_TEST_GROUP'] = previous
   end
 
-  # BEAKER_kubevirt_* variables override host and CONFIG settings. Clear every
-  # one for each example so a value exported in the developer's environment
-  # cannot change the results, and restore them afterwards.
+  # BEAKER_kubevirt_* variables, and their BEAKER_KUBEVIRT_* spellings,
+  # override host and CONFIG settings. Clear every one for each example so a
+  # value exported in the developer's environment cannot change the results,
+  # and restore them afterwards. The gem's other upper-case variables are
+  # handled separately.
   around do |example|
-    saved = ENV.to_h.select { |name, _| name.start_with?('BEAKER_kubevirt_') }
+    option_variable = lambda do |name|
+      name.start_with?('BEAKER_kubevirt_', 'BEAKER_KUBEVIRT_') &&
+        !%w[BEAKER_KUBEVIRT_TEST_GROUP BEAKER_KUBEVIRT_DISABLE_AT_EXIT_CLEANUP].include?(name)
+    end
+    saved = ENV.to_h.select { |name, _| option_variable.call(name) }
     saved.each_key { |name| ENV.delete(name) }
     example.run
   ensure
-    ENV.each_key.select { |name| name.start_with?('BEAKER_kubevirt_') }.each { |name| ENV.delete(name) }
+    ENV.each_key.select { |name| option_variable.call(name) }.each { |name| ENV.delete(name) }
     saved&.each { |name, value| ENV[name] = value }
   end
 
@@ -2293,15 +2299,45 @@ RSpec.describe Beaker::Kubevirt do
         expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'host' }))).to include('team' => 'host')
       end
 
+      it 'merges the host value over CONFIG, keeping CONFIG keys the host does not set' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'cost-centre' => '42', team: 'config' }))
+        expect(hypervisor.send(:user_labels, host.merge('kubevirt_labels' => { 'team' => 'host' }))).to eq('cost-centre' => '42', 'team' => 'host')
+      end
+
+      it 'merges a Beaker::Host value over CONFIG' do
+        global = Beaker::Options::OptionsHash.new.merge(options.merge(kubevirt_labels: { 'cost-centre' => '42' }))
+        hypervisor = described_class.new(hosts, global)
+        own = Beaker::Host.create('real-host', { 'platform' => 'el-8-x86_64', 'kubevirt_labels' => { 'team' => 'qa' } }, global)
+        inherited = Beaker::Host.create('other-host', { 'platform' => 'el-8-x86_64' }, global)
+        expect(hypervisor.send(:user_labels, own)).to eq('cost-centre' => '42', 'team' => 'qa')
+        expect(hypervisor.send(:user_labels, inherited)).to eq('cost-centre' => '42')
+      end
+
+      it 'raises ArgumentError when the CONFIG value is not a hash' do
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: 'team=infra'))
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'team' => 'host' })) }
+          .to raise_error(ArgumentError, /kubevirt_labels must be a hash of keys to values, got "team=infra"/)
+      end
+
       it 'stringifies symbol keys and non-string values' do
         expect(hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { ci: true }))).to include('ci' => 'true')
       end
 
-      it 'lets BEAKER_kubevirt_labels replace the host value' do
+      it 'lets BEAKER_kubevirt_labels replace the host and CONFIG values' do
         ENV['BEAKER_kubevirt_labels'] = 'team=env, site = west'
-        result = hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { 'other' => 'x' }))
-        expect(result).to include('team' => 'env', 'site' => 'west')
-        expect(result).not_to have_key('other')
+        hypervisor = described_class.new(hosts, options.merge(kubevirt_labels: { 'cost-centre' => '42' }))
+        result = hypervisor.send(:user_labels, host.merge('kubevirt_labels' => { 'other' => 'x' }))
+        expect(result).to eq('team' => 'env', 'site' => 'west')
+      end
+
+      it 'raises ArgumentError for a key repeated in BEAKER_kubevirt_labels' do
+        ENV['BEAKER_kubevirt_labels'] = 'team=a, team = b'
+        expect { hypervisor.send(:get_labels, host) }.to raise_error(ArgumentError, 'BEAKER_kubevirt_labels sets "team" more than once')
+      end
+
+      it 'raises ArgumentError for a symbol and a string spelling the same key' do
+        expect { hypervisor.send(:get_labels, host.merge('kubevirt_labels' => { team: 'a', 'team' => 'b' })) }
+          .to raise_error(ArgumentError, 'kubevirt_labels sets "team" more than once')
       end
 
       it 'raises ArgumentError for a BEAKER_kubevirt_labels entry without =' do
@@ -2404,6 +2440,11 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations value for "example.com.cfg" must be a single value/)
     end
 
+    it 'raises ArgumentError for a symbol and a string spelling the same key' do
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note': 'a', 'example.com/note' => 'b' } }
+      expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, 'kubevirt_annotations sets "example.com/note" more than once')
+    end
+
     it 'raises ArgumentError for an invalid annotation key' do
       host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'my note' => 'x' } }
       expect { hypervisor.send(:user_annotations, host) }.to raise_error(ArgumentError, /kubevirt_annotations key "my note"/)
@@ -2417,6 +2458,12 @@ RSpec.describe Beaker::Kubevirt do
     it 'falls back to the CONFIG value' do
       hypervisor = described_class.new(hosts, options.merge(kubevirt_annotations: evict))
       expect(hypervisor.send(:user_annotations, { 'name' => 'test-host' })).to eq(evict)
+    end
+
+    it 'merges the host value over CONFIG' do
+      hypervisor = described_class.new(hosts, options.merge(kubevirt_annotations: evict.merge('example.com/note' => 'config')))
+      host = { 'name' => 'test-host', 'kubevirt_annotations' => { 'example.com/note' => 'host' } }
+      expect(hypervisor.send(:user_annotations, host)).to eq(evict.merge('example.com/note' => 'host'))
     end
 
     it 'lets BEAKER_kubevirt_annotations replace the host value, keeping = in values' do
@@ -2719,6 +2766,17 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_node_selector is set but has no key=value entries/)
     end
 
+    it 'raises ArgumentError for a key repeated in BEAKER_kubevirt_node_selector' do
+      ENV['BEAKER_kubevirt_node_selector'] = 'pool=ci,pool=gpu'
+      expect { hypervisor.send(:node_selector, { 'name' => 'test-host' }) }
+        .to raise_error(ArgumentError, 'BEAKER_kubevirt_node_selector sets "pool" more than once')
+    end
+
+    it 'raises ArgumentError for a symbol and a string spelling the same key' do
+      host = { 'name' => 'test-host', 'kubevirt_node_selector' => { pool: 'ci', 'pool' => 'gpu' } }
+      expect { hypervisor.send(:node_selector, host) }.to raise_error(ArgumentError, 'kubevirt_node_selector sets "pool" more than once')
+    end
+
     it 'raises ArgumentError for a BEAKER_kubevirt_node_selector entry without =' do
       ENV['BEAKER_kubevirt_node_selector'] = 'node-pool.example.com/ci'
       expect { hypervisor.send(:node_selector, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value/)
@@ -2769,6 +2827,11 @@ RSpec.describe Beaker::Kubevirt do
       expect(hypervisor.send(:tolerations, host)).to eq([ci_toleration])
     end
 
+    it 'raises ArgumentError for a field given as both a symbol and a string' do
+      host = { 'name' => 'test-host', 'kubevirt_tolerations' => [ci_taint.merge(value: 'false')] }
+      expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, 'kubevirt_tolerations entry sets "value" more than once')
+    end
+
     it 'falls back to the CONFIG value' do
       hypervisor = described_class.new(hosts, options.merge(kubevirt_tolerations: [ci_taint]))
       expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to eq([ci_toleration])
@@ -2777,6 +2840,20 @@ RSpec.describe Beaker::Kubevirt do
     it 'raises ArgumentError for an unsupported effect' do
       host = { 'name' => 'test-host', 'kubevirt_tolerations' => [ci_taint.merge('effect' => 'NoRun')] }
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /effect must be one of NoSchedule, PreferNoSchedule, NoExecute, got "NoRun"/)
+    end
+
+    [nil, '', ' '].each do |effect|
+      it "omits the effect for an entry whose effect is #{effect.inspect}, tolerating every effect" do
+        entry = { 'key' => 'dedicated', 'value' => 'ci' }
+        entry['effect'] = effect unless effect.nil?
+        expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [entry] }))
+          .to eq([{ 'key' => 'dedicated', 'operator' => 'Equal', 'value' => 'ci' }])
+      end
+    end
+
+    it 'builds an Exists toleration for every effect from an entry with only a key' do
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host', 'kubevirt_tolerations' => [{ key: 'dedicated' }] }))
+        .to eq([{ 'key' => 'dedicated', 'operator' => 'Exists' }])
     end
 
     it 'raises ArgumentError for an entry without a key' do
@@ -2822,14 +2899,124 @@ RSpec.describe Beaker::Kubevirt do
       expect { hypervisor.send(:tolerations, host) }.to raise_error(ArgumentError, /BEAKER_kubevirt_tolerations is set but has no entries/)
     end
 
-    it 'raises ArgumentError for a BEAKER_kubevirt_tolerations entry without an effect' do
-      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true'
-      expect { hypervisor.send(:tolerations, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /must be key=value:Effect or key:Effect/)
+    it 'parses BEAKER_kubevirt_tolerations entries without an effect as tolerating every effect' do
+      ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true, dedicated'
+      expect(hypervisor.send(:tolerations, { 'name' => 'test-host' })).to eq(
+        [
+          { 'key' => 'node-pool.example.com/ci', 'operator' => 'Equal', 'value' => 'true' },
+          { 'key' => 'dedicated', 'operator' => 'Exists' },
+        ],
+      )
     end
 
     it 'validates the effect from BEAKER_kubevirt_tolerations' do
       ENV['BEAKER_kubevirt_tolerations'] = 'node-pool.example.com/ci=true:noschedule'
       expect { hypervisor.send(:tolerations, { 'name' => 'test-host' }) }.to raise_error(ArgumentError, /got "noschedule"/)
+    end
+  end
+
+  describe '#layered_option' do
+    let(:hypervisor) { described_class.new(hosts, options.merge(kubevirt_disk_cache: 'writethrough')) }
+
+    def lookup(host = { 'name' => 'test-host' })
+      hypervisor.send(:layered_option, host, 'kubevirt_disk_cache')
+    end
+
+    def pinned_host
+      { 'name' => 'test-host', 'kubevirt_disk_cache' => 'none' }
+    end
+
+    it 'falls back to the host, then CONFIG' do
+      expect(lookup(pinned_host)).to eq(['none', nil])
+      expect(lookup).to eq(['writethrough', nil])
+    end
+
+    it 'reads the upper-case spelling' do
+      ENV['BEAKER_KUBEVIRT_DISK_CACHE'] = ' writeback '
+      expect(lookup).to eq(%w[writeback BEAKER_KUBEVIRT_DISK_CACHE])
+    end
+
+    it 'accepts both spellings set to the same value' do
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      ENV['BEAKER_KUBEVIRT_DISK_CACHE'] = 'writeback '
+      expect(lookup).to eq(%w[writeback BEAKER_kubevirt_disk_cache])
+    end
+
+    it 'raises ArgumentError naming both spellings when they differ' do
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      ENV['BEAKER_KUBEVIRT_DISK_CACHE'] = 'none'
+      expect { lookup }.to raise_error(
+        ArgumentError, 'BEAKER_kubevirt_disk_cache="writeback" and BEAKER_KUBEVIRT_DISK_CACHE="none" disagree; set only one of them'
+      )
+    end
+
+    it 'ignores a blank spelling when the other is set' do
+      ENV['BEAKER_kubevirt_disk_cache'] = ' '
+      ENV['BEAKER_KUBEVIRT_DISK_CACHE'] = 'none'
+      expect(lookup).to eq(%w[none BEAKER_KUBEVIRT_DISK_CACHE])
+    end
+
+    it 'treats default as unset, ignoring the host and CONFIG' do
+      ENV['BEAKER_kubevirt_disk_cache'] = ' Default '
+      expect(lookup(pinned_host)).to eq([nil, nil])
+    end
+
+    it 'warns once per host when the variable overrides a value the host set' do
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      2.times { lookup(pinned_host) }
+      expect(options[:logger]).to have_received(:warn)
+        .with('BEAKER_kubevirt_disk_cache="writeback" overrides kubevirt_disk_cache "none" set on host test-host').once
+    end
+
+    it 'warns when default overrides a value the host set' do
+      ENV['BEAKER_KUBEVIRT_DISK_CACHE'] = 'default'
+      lookup(pinned_host)
+      expect(options[:logger]).to have_received(:warn).with(/BEAKER_KUBEVIRT_DISK_CACHE="default" overrides kubevirt_disk_cache "none"/)
+    end
+
+    it 'does not warn when the variable overrides only CONFIG' do
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      expect(lookup).to eq(%w[writeback BEAKER_kubevirt_disk_cache])
+      expect(options[:logger]).not_to have_received(:warn)
+    end
+
+    it 'does not warn for a Beaker::Host that inherits the value from CONFIG' do
+      global = Beaker::Options::OptionsHash.new.merge(options.merge(kubevirt_disk_cache: 'writethrough'))
+      host = Beaker::Host.create('real-host', { 'platform' => 'el-8-x86_64' }, global)
+      expect(host['kubevirt_disk_cache']).to eq('writethrough')
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      expect(lookup(host)).to eq(%w[writeback BEAKER_kubevirt_disk_cache])
+      expect(options[:logger]).not_to have_received(:warn)
+    end
+
+    it 'warns for a Beaker::Host that set the value itself' do
+      host = Beaker::Host.create('real-host', { 'platform' => 'el-8-x86_64', 'kubevirt_disk_cache' => 'none' }, options)
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      lookup(host)
+      expect(options[:logger]).to have_received(:warn).with(/overrides kubevirt_disk_cache "none" set on host real-host\z/)
+    end
+
+    it 'names a host object by its name method' do
+      host = double('Beaker::Host', name: 'object-host')
+      allow(host).to receive(:[]) { |key| pinned_host[key] }
+      ENV['BEAKER_kubevirt_disk_cache'] = 'writeback'
+      lookup(host)
+      expect(options[:logger]).to have_received(:warn).with(/set on host object-host\z/)
+    end
+
+    {
+      storage_class: ['kubevirt_storage_class', 'fast', nil],
+      disk_cache: ['kubevirt_disk_cache', 'none', nil],
+      node_selector: ['kubevirt_node_selector', { 'pool' => 'ci' }, nil],
+      tolerations: ['kubevirt_tolerations', [{ 'key' => 'ci', 'effect' => 'NoSchedule' }], nil],
+      user_labels: ['kubevirt_labels', { 'team' => 'qa' }, {}],
+      user_annotations: ['kubevirt_annotations', { 'example.com/note' => 'x' }, nil],
+    }.each do |method, (name, value, unset)|
+      it "lets BEAKER_#{name.upcase}=default unset #{name} over the host and CONFIG" do
+        ENV["BEAKER_#{name.upcase}"] = 'default'
+        hypervisor = described_class.new(hosts, options.merge(name.to_sym => value))
+        expect(hypervisor.send(method, { 'name' => 'test-host', name => value })).to eq(unset)
+      end
     end
   end
 

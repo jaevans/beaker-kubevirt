@@ -621,19 +621,25 @@ module Beaker
     end
 
     ##
-    # A hash option that BEAKER_<name> may replace with a comma-separated list
-    # of key=value pairs. Only the first = in a pair separates key from value.
+    # A hash option whose host value is merged over its CONFIG value, the
+    # host winning per key, so a host's own entries keep global ones such as
+    # a cost-centre label. BEAKER_<name>, a comma-separated list of key=value
+    # pairs, replaces both. Only the first = in a pair separates key from
+    # value.
     # @param [Host] host The host configuration
     # @param [String] name The option name
     # @return [Hash{String=>String}] The option, empty when unset
     def key_value_option(host, name)
-      env = env_option(name)
-      value = env ? parse_key_values(name, env) : host[name] || @options[name.to_sym]
-      return {} if value.nil?
-      raise ArgumentError, "#{name} must be a hash of keys to values, got #{value.inspect}" unless value.is_a?(Hash)
+      value, variable = layered_option(host, name) do |host_value, config_value|
+        [config_value, host_value].compact.reduce({}) do |merged, hash|
+          raise ArgumentError, "#{name} must be a hash of keys to values, got #{hash.inspect}" unless hash.is_a?(Hash)
 
-      value.to_h do |key, val|
-        key = key.to_s
+          merged.merge(string_keys(name, hash))
+        end
+      end
+      return {} if value.nil?
+
+      (variable ? parse_key_values(variable, value) : value).to_h do |key, val|
         unless qualified_key?(key)
           raise ArgumentError, "#{name} key #{key.inspect} is not a valid Kubernetes key: expected an optional DNS subdomain " \
                                "prefix and '/', then a name of at most #{LABEL_VALUE_MAX} characters of letters, digits, " \
@@ -659,15 +665,38 @@ module Beaker
       slash.empty? || (prefix.length <= KEY_PREFIX_MAX && KEY_PREFIX_RE.match?(prefix))
     end
 
-    def parse_key_values(name, value)
+    ##
+    # Parse an environment variable's comma-separated key=value list. Only the
+    # first = in a pair separates key from value.
+    # @param [String] variable The variable's name, for error messages
+    # @param [String] value The variable's value
+    # @return [Hash{String=>String}]
+    def parse_key_values(variable, value)
       pairs = value.split(',').map(&:strip).reject(&:empty?)
-      raise ArgumentError, "BEAKER_#{name} is set but has no key=value entries: #{value.inspect}" if pairs.empty?
+      raise ArgumentError, "#{variable} is set but has no key=value entries: #{value.inspect}" if pairs.empty?
 
-      pairs.to_h do |pair|
+      pairs.each_with_object({}) do |pair, parsed|
         key, val = pair.split('=', 2).map(&:strip)
-        raise ArgumentError, "BEAKER_#{name} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
+        raise ArgumentError, "#{variable} entries must be key=value, got #{pair.inspect}" if val.nil? || key.empty?
+        raise ArgumentError, "#{variable} sets #{key.inspect} more than once" if parsed.key?(key)
 
-        [key, val]
+        parsed[key] = val
+      end
+    end
+
+    ##
+    # A hash with its keys converted to strings. YAML and Ruby both allow a
+    # symbol and a string that convert to the same key, and the later one
+    # would silently win, so that raises instead.
+    # @param [String] name The option name, for error messages
+    # @param [Hash] hash
+    # @return [Hash{String=>Object}]
+    def string_keys(name, hash)
+      hash.each_with_object({}) do |(key, value), converted|
+        key = key.to_s
+        raise ArgumentError, "#{name} sets #{key.inspect} more than once" if converted.key?(key)
+
+        converted[key] = value
       end
     end
 
@@ -705,15 +734,63 @@ module Beaker
     end
 
     ##
-    # The value of the BEAKER_<name> environment variable, which overrides the
-    # host and CONFIG settings of the option it names so that a CI environment
-    # can set it for every nodeset it runs, as beaker-google's BEAKER_gce_*
-    # variables do.
+    # The value of an option from the BEAKER_<name> environment variable, the
+    # host or the global CONFIG, in that order. The variable lets a CI
+    # environment set the option for every nodeset it runs, as beaker-google's
+    # BEAKER_gce_* variables do; a blank variable is ignored, and the value
+    # `default` unsets the option, ignoring the host and CONFIG. A variable
+    # that overrides a value the host set is logged, since the host may have
+    # set it deliberately. Beaker::Host#[] falls back to the global options,
+    # so only host_hash tells whether the host set the value itself. Every option a variable can override goes through
+    # here, so that they share one set of precedence and empty-value rules.
+    # @param [Host] host The host configuration
     # @param [String] name The option name, e.g. 'kubevirt_disk_cache'
-    # @return [String, nil] The stripped value, or nil when unset or blank
+    # @yieldparam [Object] host_value The host's value
+    # @yieldparam [Object] config_value The CONFIG value
+    # @yieldreturn [Object] The value to use when no variable is set; without a
+    #   block, the host value unless it is nil or false, else the CONFIG value
+    # @return [Array(Object, String)] The value, and the name of the variable
+    #   it came from, or nil when it came from the host or CONFIG or the
+    #   variable was `default`. A value from a variable is the stripped,
+    #   unparsed string.
+    def layered_option(host, name)
+      host_value = host[name]
+      variable, value = env_option(name)
+      if variable
+        own_value = host.respond_to?(:host_hash) ? host.host_hash[name] : host_value
+        warn_env_override(host, name, variable, value, own_value) unless own_value.nil? || (own_value.respond_to?(:empty?) && own_value.empty?)
+        return value.casecmp?('default') ? [nil, nil] : [value, variable]
+      end
+
+      config_value = @options[name.to_sym]
+      [block_given? ? yield(host_value, config_value) : host_value || config_value, nil]
+    end
+
+    ##
+    # The environment variable that sets an option, spelt BEAKER_<name> or
+    # with the option name upper-cased to match the gem's other variables.
+    # @param [String] name The option name
+    # @return [Array(String, String), nil] The variable's name and stripped
+    #   value, or nil when neither spelling is set to a non-blank value
+    # @raise [ArgumentError] if both spellings are set to different values
     def env_option(name)
-      value = ENV.fetch("BEAKER_#{name}", nil)&.strip
-      value unless value.nil? || value.empty?
+      set = ["BEAKER_#{name}", "BEAKER_#{name.upcase}"].uniq.filter_map do |variable|
+        value = ENV.fetch(variable, nil)&.strip
+        [variable, value] unless value.nil? || value.empty?
+      end
+      (lower, lower_value), (upper, upper_value) = set
+      raise ArgumentError, "#{lower}=#{lower_value.inspect} and #{upper}=#{upper_value.inspect} disagree; set only one of them" if upper && lower_value != upper_value
+
+      set.first
+    end
+
+    def warn_env_override(host, name, variable, value, host_value)
+      host_name = host.respond_to?(:name) ? host.name : host['name']
+      @warned_env_overrides ||= {}
+      return if @warned_env_overrides[[host_name, name]]
+
+      @warned_env_overrides[[host_name, name]] = true
+      @logger.warn("#{variable}=#{value.inspect} overrides #{name} #{host_value.inspect} set on host #{host_name}")
     end
 
     ##
@@ -726,17 +803,13 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] One of DISK_CACHE_MODES, or nil when unset
     def disk_cache(host)
-      env = env_option('kubevirt_disk_cache')
-      value = env || host['kubevirt_disk_cache'] || @options[:kubevirt_disk_cache]
+      value, variable = layered_option(host, 'kubevirt_disk_cache')
       return nil if value.nil? || value.to_s.empty?
 
       cache = value.to_s.downcase
-      unless DISK_CACHE_MODES.include?(cache)
-        source = env ? 'BEAKER_kubevirt_disk_cache' : 'kubevirt_disk_cache'
-        raise ArgumentError, "#{source} must be one of #{DISK_CACHE_MODES.join(', ')}, got #{value.to_s.inspect}"
-      end
+      return cache if DISK_CACHE_MODES.include?(cache)
 
-      cache
+      raise ArgumentError, "#{variable || 'kubevirt_disk_cache'} must be one of #{DISK_CACHE_MODES.join(', ')}, got #{value.to_s.inspect}"
     end
 
     ##
@@ -746,16 +819,16 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [Hash{String=>String}, nil] The selector, or nil when unset
     def node_selector(host)
-      env = env_option('kubevirt_node_selector')
-      selector = env ? parse_key_values('kubevirt_node_selector', env) : host['kubevirt_node_selector'] || @options[:kubevirt_node_selector]
+      selector, variable = layered_option(host, 'kubevirt_node_selector')
+      selector = parse_key_values(variable, selector) if variable
       return nil if selector.nil?
       raise ArgumentError, "kubevirt_node_selector must be a hash of label keys to values, got #{selector.inspect}" unless selector.is_a?(Hash)
       return nil if selector.empty?
 
-      selector.to_h do |key, value|
-        raise ArgumentError, "kubevirt_node_selector value for #{key.to_s.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
+      string_keys('kubevirt_node_selector', selector).to_h do |key, value|
+        raise ArgumentError, "kubevirt_node_selector value for #{key.inspect} must be a single label value, got #{value.inspect}" unless scalar?(value)
 
-        [key.to_s, value.to_s]
+        [key, value.to_s]
       end
     end
 
@@ -770,15 +843,16 @@ module Beaker
 
     ##
     # Tolerations for the VM's pod, from BEAKER_kubevirt_tolerations, the host
-    # or the global CONFIG, in that order. Each entry has a key, an effect and
-    # an optional value; one without a value tolerates the key whatever its
-    # value. The variable is a comma-separated list of key=value:Effect or
-    # key:Effect entries.
+    # or the global CONFIG, in that order. Each entry has a key, an optional
+    # value and an optional effect; one without a value tolerates the key
+    # whatever its value, and one without an effect tolerates every effect,
+    # as Kubernetes treats an empty effect. The variable is a comma-separated
+    # list of key=value:Effect, key:Effect, key=value or key entries.
     # @param [Host] host The host configuration
     # @return [Array<Hash>, nil] Kubernetes tolerations, or nil when unset
     def tolerations(host)
-      env = env_option('kubevirt_tolerations')
-      list = env ? parse_tolerations(env) : host['kubevirt_tolerations'] || @options[:kubevirt_tolerations]
+      list, variable = layered_option(host, 'kubevirt_tolerations')
+      list = parse_tolerations(variable, list) if variable
       return nil if list.nil?
       raise ArgumentError, "kubevirt_tolerations must be a list of key/value/effect entries, got #{list.inspect}" unless list.is_a?(Array)
       return nil if list.empty?
@@ -786,14 +860,18 @@ module Beaker
       list.map { |entry| build_toleration(entry) }
     end
 
-    def parse_tolerations(value)
+    def parse_tolerations(variable, value)
       entries = value.split(',').map(&:strip).reject(&:empty?)
-      raise ArgumentError, "BEAKER_kubevirt_tolerations is set but has no entries: #{value.inspect}" if entries.empty?
+      raise ArgumentError, "#{variable} is set but has no entries: #{value.inspect}" if entries.empty?
 
       entries.map do |entry|
+        # Neither a taint key nor its value may contain ':', so the last one
+        # can only introduce the effect.
         taint, separator, effect = entry.rpartition(':')
-        raise ArgumentError, "BEAKER_kubevirt_tolerations entries must be key=value:Effect or key:Effect, got #{entry.inspect}" if separator.empty?
-
+        if separator.empty?
+          taint = effect
+          effect = nil
+        end
         key, toleration_value = taint.split('=', 2)
         { 'key' => key, 'value' => toleration_value, 'effect' => effect }
       end
@@ -804,27 +882,27 @@ module Beaker
 
       # operator and tolerationSeconds are not supported. Dropping them silently
       # would change what the toleration matches or how long it lasts.
-      unknown = entry.keys.map(&:to_s) - TOLERATION_FIELDS
+      fields = string_keys('kubevirt_tolerations entry', entry)
+      unknown = fields.keys - TOLERATION_FIELDS
       unless unknown.empty?
         raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has unsupported fields #{unknown.join(', ')}; " \
                              "only #{TOLERATION_FIELDS.join(', ')} are accepted (an entry without a value tolerates any value)"
       end
 
-      # key? rather than ||, so a YAML `value: false` is the string "false" and
-      # not a missing value, which would widen the toleration to Exists.
-      key, value, effect = %w[key value effect].map { |field| entry.key?(field) ? entry[field] : entry[field.to_sym] }
+      # Not ||, so a YAML `value: false` is the string "false" and not a
+      # missing value, which would widen the toleration to Exists.
+      key, value, effect = fields.values_at('key', 'value', 'effect')
       key = key.to_s.strip
       effect = effect.to_s.strip
       raise ArgumentError, "kubevirt_tolerations entry #{entry.inspect} has no key" if key.empty?
-      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless TOLERATION_EFFECTS.include?(effect)
+      raise ArgumentError, "kubevirt_tolerations effect must be one of #{TOLERATION_EFFECTS.join(', ')}, got #{effect.inspect}" unless effect.empty? || TOLERATION_EFFECTS.include?(effect)
 
       # Only an absent value means Exists. An explicit empty string is Equal "",
       # which matches only taints whose value is empty.
-      if value.nil?
-        { 'key' => key, 'operator' => 'Exists', 'effect' => effect }
-      else
-        { 'key' => key, 'operator' => 'Equal', 'value' => value.to_s.strip, 'effect' => effect }
-      end
+      toleration = { 'key' => key }
+      toleration.merge!(value.nil? ? { 'operator' => 'Exists' } : { 'operator' => 'Equal', 'value' => value.to_s.strip })
+      toleration['effect'] = effect unless effect.empty?
+      toleration
     end
 
     ##
@@ -1005,7 +1083,8 @@ module Beaker
     # @param [Host] host The host configuration
     # @return [String, nil] The storage class name, or nil when unset
     def storage_class(host)
-      name = (env_option('kubevirt_storage_class') || host['kubevirt_storage_class'] || @options[:kubevirt_storage_class]).to_s.strip
+      value, = layered_option(host, 'kubevirt_storage_class')
+      name = value.to_s.strip
       name unless name.empty?
     end
 
